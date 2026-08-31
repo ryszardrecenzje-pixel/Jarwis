@@ -185,4 +185,100 @@ def execute_action(action: dict) -> str:
 
         # ---------- CZEKANIE ----------
         elif t == "wait":
-            seconds 
+            seconds = float(action.get("seconds", 1))
+            time.sleep(seconds)
+            return f"Czekałem {seconds}s"
+
+        # ---------- SCHOWEK ----------
+        elif t == "copy_to_clipboard":
+            text = action.get("text", "")
+            pyperclip.copy(text)
+            return "Tekst skopiowany do schowka"
+
+        # ---------- NAJNOWSZY PLIK ----------
+        elif t == "get_newest_file":
+            folder = action.get("folder", DOWNLOADS_PATH)
+            extension = action.get("extension", None)
+
+            if not os.path.exists(folder):
+                return f"Folder nie istnieje: {folder}"
+
+            files = []
+            for f in os.listdir(folder):
+                full = os.path.join(folder, f)
+                if os.path.isfile(full):
+                    if extension is None or f.lower().endswith(extension.lower()):
+                        files.append(full)
+
+            if not files:
+                return "Nie znaleziono żadnych plików"
+
+            newest = max(files, key=os.path.getmtime)
+            return f"Najnowszy plik: {newest}"
+
+        # ---------- KONIEC ----------
+        elif t == "done":
+            return action.get("message", "Gotowe")
+
+        else:
+            return f"Nieznana akcja: {t}"
+
+    except Exception as e:
+        return f"Błąd przy akcji '{t}': {str(e)}"
+
+
+def main():
+    print("=" * 65)
+    print("  Lokalny Jarvis – Windows + Ollama")
+    print("  Komendy tekstowe | Pełna kontrola plików i Excela")
+    print("  Wpisz 'exit' żeby wyjść")
+    print("  FAILSAFE: przesuń myszkę w lewy górny róg = natychmiastowy STOP")
+    print("=" * 65)
+
+    while True:
+        user_input = input("\nTy > ").strip()
+        if user_input.lower() in ["exit", "quit", "wyjście", "koniec"]:
+            print("Do zobaczenia!")
+            break
+
+        if not user_input:
+            continue
+
+        print("Myślę...")
+
+        try:
+            response = ollama.chat(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": user_input}
+                ],
+                format="json",
+                options={"temperature": 0.15}
+            )
+
+            content = response["message"]["content"]
+            print("\n--- Odpowiedź modelu ---")
+            print(content)
+            print("------------------------")
+
+            data = json.loads(content)
+            actions = data.get("actions", [])
+
+            if not actions:
+                print("Brak akcji do wykonania.")
+                continue
+
+            print("\nWykonuję:")
+            for i, action in enumerate(actions, 1):
+                result = execute_action(action)
+                print(f"  {i}. {result}")
+
+        except json.JSONDecodeError:
+            print("Model nie zwrócił poprawnego JSON-a. Spróbuj inaczej sformułować komendę.")
+        except Exception as e:
+            print(f"Błąd ogólny: {e}")
+
+
+if __name__ == "__main__":
+    main()
