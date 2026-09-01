@@ -10,7 +10,6 @@ from PIL import Image
 import streamlit as st
 import plotly.express as px
 
-# ── localStorage (Faza 2) ─────────────────────
 try:
     from streamlit_local_storage import LocalStorage
     _local_storage = LocalStorage()
@@ -19,7 +18,6 @@ except Exception:
     _local_storage = None
     HAS_LOCAL_STORAGE = False
 
-# ── Google Drive (Faza 3) ─────────────────────
 try:
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import Flow
@@ -29,7 +27,6 @@ try:
 except Exception:
     HAS_GOOGLE = False
 
-# ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Jarwis – Menedżer Paragonów",
     page_icon="🧾",
@@ -47,7 +44,6 @@ MODELS = [
     "gemini-2.5-flash",
     "gemini-3.5-flash-lite",
 ]
-# drive.file = tylko pliki utworzone przez tę aplikację
 GOOGLE_SCOPES = [
     "openid",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -55,60 +51,51 @@ GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/drive.file",
 ]
 
-# ──────────────────────────────────────────────
-# CSS
-# ──────────────────────────────────────────────
-st.markdown(
-    """
-    <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
-    .main-header {
-        background: linear-gradient(135deg, #1e3a5f 0%, #0f766e 100%);
-        padding: 1.5rem 2rem; border-radius: 16px; color: white;
-        margin-bottom: 1.5rem; box-shadow: 0 8px 24px rgba(15, 118, 110, 0.25);
-    }
-    .main-header h1 { margin: 0; font-size: 1.9rem; font-weight: 700; }
-    .main-header p { margin: 0.4rem 0 0 0; opacity: 0.9; font-size: 1rem; }
-    .metric-card {
-        background: white; border: 1px solid #e2e8f0; border-radius: 12px;
-        padding: 1.1rem 1.3rem; box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-        text-align: center; height: 100%;
-    }
-    .metric-card .label {
-        font-size: 0.8rem; color: #64748b; font-weight: 500;
-        text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 0.3rem;
-    }
-    .metric-card .value { font-size: 1.6rem; font-weight: 700; color: #0f172a; }
-    .metric-card .unit { font-size: 0.9rem; color: #64748b; font-weight: 500; }
-    .stDownloadButton > button {
-        background: linear-gradient(135deg, #0f766e, #0d9488) !important;
-        color: white !important; border: none !important; border-radius: 10px !important;
-        font-weight: 600 !important;
-    }
-    div[data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e2e8f0; }
-    .receipt-badge {
-        display: inline-block; background: #ecfdf5; color: #065f46;
-        padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; }
+.main-header {
+    background: linear-gradient(135deg, #1e3a5f 0%, #0f766e 100%);
+    padding: 1.5rem 2rem; border-radius: 16px; color: white;
+    margin-bottom: 1.5rem; box-shadow: 0 8px 24px rgba(15, 118, 110, 0.25);
+}
+.main-header h1 { margin: 0; font-size: 1.9rem; font-weight: 700; }
+.main-header p { margin: 0.4rem 0 0 0; opacity: 0.9; font-size: 1rem; }
+.metric-card {
+    background: white; border: 1px solid #e2e8f0; border-radius: 12px;
+    padding: 1.1rem 1.3rem; box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+    text-align: center; height: 100%;
+}
+.metric-card .label {
+    font-size: 0.8rem; color: #64748b; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 0.3rem;
+}
+.metric-card .value { font-size: 1.6rem; font-weight: 700; color: #0f172a; }
+.metric-card .unit { font-size: 0.9rem; color: #64748b; font-weight: 500; }
+.stDownloadButton > button {
+    background: linear-gradient(135deg, #0f766e, #0d9488) !important;
+    color: white !important; border: none !important; border-radius: 10px !important;
+    font-weight: 600 !important;
+}
+div[data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e2e8f0; }
+.receipt-badge {
+    display: inline-block; background: #ecfdf5; color: #065f46;
+    padding: 0.2rem 0.6rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600;
+}
+</style>
+""", unsafe_allow_html=True)
 
-st.markdown(
-    """
-    <div class="main-header">
-        <h1>🧾 Jarwis – Inteligentny Analizator Paragonów</h1>
-        <p>Paragony • localStorage • Google Drive • podsumowania kwartalne i półroczne</p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+st.markdown("""
+<div class="main-header">
+    <h1>🧾 Jarwis – Inteligentny Analizator Paragonów</h1>
+    <p>Paragony • localStorage • Google Drive • podsumowania kwartalne i półroczne</p>
+</div>
+""", unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────
-# Session state
-# ──────────────────────────────────────────────
+# API key TYLKO z Secrets (bez pola w sidebarze)
+api_key = st.secrets.get("GEMINI_API_KEY")
+
 defaults = {
     "paragony_data": [],
     "processed_files": set(),
@@ -124,9 +111,7 @@ for k, v in defaults.items():
     if k not in st.session_state:
         st.session_state[k] = v
 
-# ──────────────────────────────────────────────
-# Historia – serializacja
-# ──────────────────────────────────────────────
+
 def history_to_serializable(paragony_data):
     out = []
     for p in paragony_data:
@@ -145,13 +130,11 @@ def history_to_serializable(paragony_data):
     }
 
 
-def apply_history_payload(payload: dict, merge: bool = False):
-    """Wczytuje historię. merge=True dokłada brakujące nazwy plików zamiast nadpisywać."""
+def apply_history_payload(payload, merge=False):
     incoming = payload.get("paragony", [])
     if not merge:
         st.session_state.paragony_data = []
         st.session_state.processed_files = set()
-
     existing = {p["nazwa_pliku"] for p in st.session_state.paragony_data}
     for p in incoming:
         name = p.get("nazwa_pliku", "nieznany.jpg")
@@ -169,9 +152,6 @@ def apply_history_payload(payload: dict, merge: bool = False):
         st.session_state.processed_files.add(name)
 
 
-# ──────────────────────────────────────────────
-# localStorage helpers
-# ──────────────────────────────────────────────
 def save_to_browser():
     if not HAS_LOCAL_STORAGE or _local_storage is None:
         return False
@@ -205,14 +185,23 @@ def load_from_browser():
         return -1
 
 
-# ──────────────────────────────────────────────
-# Google OAuth + Drive
-# ──────────────────────────────────────────────
-def _google_client_config():
-    """Czyta client_id / secret z secrets."""
+def _redirect_uri():
     try:
-        cid = st.secrets.get("GOOGLE_CLIENT_ID") or st.secrets["google"]["client_id"]
-        csec = st.secrets.get("GOOGLE_CLIENT_SECRET") or st.secrets["google"]["client_secret"]
+        custom = st.secrets.get("GOOGLE_REDIRECT_URI")
+        if custom:
+            return str(custom).rstrip("/") + "/"
+    except Exception:
+        pass
+    return "https://localhost:8501/"
+
+
+def _google_client_config():
+    try:
+        cid = st.secrets.get("GOOGLE_CLIENT_ID")
+        csec = st.secrets.get("GOOGLE_CLIENT_SECRET")
+        if not cid:
+            cid = st.secrets["google"]["client_id"]
+            csec = st.secrets["google"]["client_secret"]
     except Exception:
         return None
     if not cid or not csec:
@@ -226,23 +215,6 @@ def _google_client_config():
             "redirect_uris": [_redirect_uri()],
         }
     }
-
-
-def _redirect_uri():
-    """URI powrotu – Streamlit Cloud lub lokalnie."""
-    # Można nadpisać w secrets: GOOGLE_REDIRECT_URI
-    try:
-        custom = st.secrets.get("GOOGLE_REDIRECT_URI")
-        if custom:
-            return custom
-    except Exception:
-        pass
-    # Streamlit ustawia czasem te zmienne
-    host = os.environ.get("STREAMLIT_SERVER_URL") or ""
-    if host:
-        return host.rstrip("/") + "/"
-    # Fallback – użytkownik musi ustawić GOOGLE_REDIRECT_URI w secrets
-    return "https://localhost:8501/"
 
 
 def google_configured():
@@ -276,7 +248,6 @@ def complete_google_oauth(code: str):
         "client_secret": creds.client_secret,
         "scopes": list(creds.scopes or GOOGLE_SCOPES),
     }
-    # email
     try:
         service = build("oauth2", "v2", credentials=creds)
         info = service.userinfo().get().execute()
@@ -321,16 +292,13 @@ def drive_find_or_create_folder(service):
 
 
 def drive_find_history_file(service, folder_id):
-    q = (
-        f"name='{DRIVE_FILENAME}' and '{folder_id}' in parents and trashed=false"
-    )
+    q = f"name='{DRIVE_FILENAME}' and '{folder_id}' in parents and trashed=false"
     res = service.files().list(q=q, spaces="drive", fields="files(id, name, modifiedTime)").execute()
     files = res.get("files", [])
     return files[0] if files else None
 
 
 def save_to_drive():
-    """Zapisuje historię JSON na Google Drive użytkownika."""
     if not st.session_state.google_creds:
         return False
     try:
@@ -339,23 +307,16 @@ def save_to_drive():
         payload = history_to_serializable(st.session_state.paragony_data)
         content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
         media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/json", resumable=False)
-
         existing = drive_find_history_file(service, folder_id)
         if existing:
-            service.files().update(
-                fileId=existing["id"], media_body=media
-            ).execute()
+            service.files().update(fileId=existing["id"], media_body=media).execute()
             st.session_state.drive_file_id = existing["id"]
         else:
             meta = {"name": DRIVE_FILENAME, "parents": [folder_id]}
-            created = service.files().create(
-                body=meta, media_body=media, fields="id"
-            ).execute()
+            created = service.files().create(body=meta, media_body=media, fields="id").execute()
             st.session_state.drive_file_id = created["id"]
-
         st.session_state.drive_status = (
-            f"Drive · zapisano {len(payload['paragony'])} par. · "
-            f"{datetime.now().strftime('%H:%M:%S')}"
+            f"Drive · zapisano {len(payload['paragony'])} par. · {datetime.now().strftime('%H:%M:%S')}"
         )
         return True
     except Exception as e:
@@ -363,7 +324,7 @@ def save_to_drive():
         return False
 
 
-def load_from_drive(merge: bool = False):
+def load_from_drive(merge=False):
     if not st.session_state.google_creds:
         return -1
     try:
@@ -371,9 +332,8 @@ def load_from_drive(merge: bool = False):
         folder_id = drive_find_or_create_folder(service)
         existing = drive_find_history_file(service, folder_id)
         if not existing:
-            st.session_state.drive_status = "Drive · brak pliku historii (jeszcze nic nie zapisano)"
+            st.session_state.drive_status = "Drive · brak pliku historii"
             return 0
-
         request = service.files().get_media(fileId=existing["id"])
         buf = io.BytesIO()
         downloader = MediaIoBaseDownload(buf, request)
@@ -384,10 +344,7 @@ def load_from_drive(merge: bool = False):
         payload = json.loads(buf.read().decode("utf-8"))
         apply_history_payload(payload, merge=merge)
         st.session_state.drive_file_id = existing["id"]
-        st.session_state.drive_status = (
-            f"Drive · wczytano {len(payload.get('paragony', []))} par. · "
-            f"{existing.get('modifiedTime', '')[:19]}"
-        )
+        st.session_state.drive_status = f"Drive · wczytano {len(payload.get('paragony', []))} par."
         return len(payload.get("paragony", []))
     except Exception as e:
         st.session_state.drive_status = f"Drive błąd odczytu: {e}"
@@ -395,43 +352,37 @@ def load_from_drive(merge: bool = False):
 
 
 def persist_all():
-    """Zapis lokalny + Drive (jeśli połączono)."""
     save_to_browser()
     if st.session_state.google_creds:
         save_to_drive()
 
 
-# Obsługa powrotu z OAuth (?code=...)
+# OAuth callback
 qp = st.query_params
 if "code" in qp and not st.session_state.google_creds and google_configured():
     try:
         complete_google_oauth(qp["code"])
-        # wyczyść parametry z URL
         st.query_params.clear()
-        # po połączeniu – wczytaj historię z Drive
         n = load_from_drive(merge=True)
         save_to_browser()
         if n and n > 0:
-            st.toast(f"Połączono z Google · przywrócono {n} paragonów z Drive", icon="☁️")
+            st.toast(f"Google OK · {n} paragonów z Drive", icon="☁️")
         else:
             st.toast("Połączono z Google Drive", icon="☁️")
         st.rerun()
     except Exception as e:
         st.error(f"Błąd logowania Google: {e}")
 
-# Auto-load localStorage przy starcie
 if not st.session_state.storage_loaded:
     st.session_state.storage_loaded = True
     if not st.session_state.paragony_data and HAS_LOCAL_STORAGE:
         n = load_from_browser()
         if n and n > 0:
-            st.toast(f"Przywrócono {n} paragonów z pamięci urządzenia", icon="💾")
+            st.toast(f"Przywrócono {n} paragonów z urządzenia", icon="💾")
 
-# ──────────────────────────────────────────────
-# Analiza AI
-# ──────────────────────────────────────────────
-def analyze_receipt(image, api_key: str):
-    client = genai.Client(api_key=api_key)
+
+def analyze_receipt(image, api_key_value: str):
+    client = genai.Client(api_key=api_key_value)
     prompt = """
 Jesteś precyzyjnym systemem OCR i analizy paragonów sklepowych (Polska).
 Zwróć WYŁĄCZNIE czysty JSON (jeden obiekt) – bez markdown.
@@ -450,9 +401,7 @@ Tylko pozycje produktów. Brak ilości → 1. Niepewna kategoria → Inne.
     for model_name in MODELS:
         for attempt in range(3):
             try:
-                response = client.models.generate_content(
-                    model=model_name, contents=[image, prompt]
-                )
+                response = client.models.generate_content(model=model_name, contents=[image, prompt])
                 raw = response.text.strip()
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)
                 raw = re.sub(r"\s*```$", "", raw).strip()
@@ -461,7 +410,6 @@ Tylko pozycje produktów. Brak ilości → 1. Niepewna kategoria → Inne.
                     data = {"data_paragonu": None, "sklep": None, "pozycje": data}
                 if not isinstance(data, dict):
                     raise ValueError("Oczekiwano obiektu JSON")
-
                 cleaned = []
                 for it in data.get("pozycje") or []:
                     if not isinstance(it, dict):
@@ -483,7 +431,6 @@ Tylko pozycje produktów. Brak ilości → 1. Niepewna kategoria → Inne.
                         "Cena": round(cena, 2),
                         "Ilość": ilosc,
                     })
-
                 data_paragonu = data.get("data_paragonu")
                 if data_paragonu:
                     data_paragonu = str(data_paragonu)[:10]
@@ -504,28 +451,25 @@ Tylko pozycje produktów. Brak ilości → 1. Niepewna kategoria → Inne.
     raise RuntimeError(last_error or "Nie udało się przeanalizować paragonu")
 
 
-# ──────────────────────────────────────────────
 # SIDEBAR
-# ──────────────────────────────────────────────
 with st.sidebar:
-    
+    st.header("🔑 API")
+    if api_key:
+        st.success("Klucz Gemini: ustawiony (Secrets)")
+    else:
+        st.error("Brak GEMINI_API_KEY w Secrets Streamlit Cloud")
 
     st.divider()
-    st.subheader("☁️ Google Drive (Faza 3)")
+    st.subheader("☁️ Google Drive")
 
     if not HAS_GOOGLE:
-        st.error("Brak bibliotek Google – dodaj je do requirements.txt i zrestartuj.")
+        st.error("Brak bibliotek Google – sprawdź requirements.txt")
     elif not google_configured():
         st.warning(
-            "Brak konfiguracji OAuth.\n\n"
-            "W Streamlit **Secrets** dodaj:\n\n"
-            "```toml\n"
-            "GOOGLE_CLIENT_ID = \"....apps.googleusercontent.com\"\n"
-            "GOOGLE_CLIENT_SECRET = \"...\"\n"
-            "GOOGLE_REDIRECT_URI = \"https://TWOJA-APP.streamlit.app/\"\n"
-            "```\n\n"
-            "W Google Cloud Console → OAuth Client (Web) "
-            "dodaj ten sam Redirect URI."
+            "Uzupełnij Secrets:\n\n"
+            "`GOOGLE_CLIENT_ID`\n"
+            "`GOOGLE_CLIENT_SECRET`\n"
+            "`GOOGLE_REDIRECT_URI`"
         )
     elif st.session_state.google_creds:
         st.success(f"Połączono: **{st.session_state.google_email or 'Google'}**")
@@ -533,36 +477,27 @@ with st.sidebar:
             st.caption(st.session_state.drive_status)
         c1, c2 = st.columns(2)
         with c1:
-            if st.button("☁️ Zapisz na Drive", use_container_width=True):
+            if st.button("☁️ Zapisz", use_container_width=True):
                 if save_to_drive():
-                    st.toast("Zapisano na Google Drive", icon="☁️")
+                    st.toast("Zapisano na Drive", icon="☁️")
         with c2:
-            if st.button("☁️ Wczytaj z Drive", use_container_width=True):
+            if st.button("☁️ Wczytaj", use_container_width=True):
                 n = load_from_drive(merge=False)
                 save_to_browser()
                 if n and n > 0:
-                    st.toast(f"Wczytano {n} paragonów", icon="☁️")
                     st.rerun()
-                elif n == 0:
-                    st.info("Na Drive nie ma jeszcze historii.")
-        if st.button("🔌 Rozłącz Google", use_container_width=True):
+        if st.button("🔌 Rozłącz", use_container_width=True):
             st.session_state.google_creds = None
             st.session_state.google_email = None
             st.session_state.drive_file_id = None
             st.session_state.drive_status = ""
             st.rerun()
-        st.caption(f"Plik: Drive / {DRIVE_FOLDER_NAME} / {DRIVE_FILENAME}")
+        st.caption(f"Folder: {DRIVE_FOLDER_NAME} / {DRIVE_FILENAME}")
     else:
         auth_url = get_google_auth_url()
         if auth_url:
-            st.markdown(
-                f'<a href="{auth_url}" target="_self">'
-                f'<button style="width:100%;padding:0.6rem;border:none;border-radius:8px;'
-                f'background:#0f766e;color:white;font-weight:600;cursor:pointer;">'
-                f"🔗 Połącz z Google Drive</button></a>",
-                unsafe_allow_html=True,
-            )
-            st.caption("Zaloguj się kontem Google – historia będzie w folderze „Jarwis” na Twoim Drive.")
+            st.link_button("🔗 Połącz z Google Drive", auth_url, use_container_width=True)
+            st.caption("Zaloguj się kontem dodanym jako użytkownik testowy w Google Cloud.")
         else:
             st.error("Nie można utworzyć URL logowania.")
 
@@ -576,14 +511,13 @@ with st.sidebar:
         with b1:
             if st.button("💾 Zapisz", use_container_width=True, key="ls_save"):
                 save_to_browser()
-                st.toast("localStorage OK", icon="💾")
         with b2:
             if st.button("📥 Wczytaj", use_container_width=True, key="ls_load"):
                 n = load_from_browser()
                 if n and n > 0:
                     st.rerun()
     else:
-        st.caption("localStorage niedostępny (brak pakietu)")
+        st.caption("localStorage niedostępny")
 
     st.divider()
     st.subheader("📂 Sesja")
@@ -639,9 +573,7 @@ with st.sidebar:
         except Exception as e:
             st.error(str(e))
 
-# ──────────────────────────────────────────────
-# Upload + analiza
-# ──────────────────────────────────────────────
+
 uploaded_files = st.file_uploader(
     "📷 Zdjęcia paragonów (JPG / PNG)",
     type=["jpg", "jpeg", "png"],
@@ -650,7 +582,7 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     if not api_key:
-        st.error("⚠️ Brak klucza Gemini API.")
+        st.error("⚠️ Brak GEMINI_API_KEY w Secrets.")
     else:
         for uploaded_file in uploaded_files:
             if uploaded_file.name in st.session_state.processed_files:
@@ -677,7 +609,7 @@ if uploaded_files:
                     })
                     st.session_state.processed_files.add(uploaded_file.name)
                     st.session_state.failed_files.pop(uploaded_file.name, None)
-                    persist_all()  # localStorage + Drive
+                    persist_all()
                     extra = " · ".join(filter(None, [data_paragonu, sklep]))
                     status.update(
                         label=f"✅ {uploaded_file.name} ({len(cleaned)}) {extra} · {used_model}",
@@ -699,19 +631,8 @@ if st.session_state.failed_files:
 
 if not st.session_state.paragony_data:
     st.info("Wrzuć paragony albo połącz Google Drive / poczekaj na localStorage.")
-    st.markdown("""
-**Warstwy zapisu**
-1. **localStorage** – automatycznie na tym telefonie/przeglądarce  
-2. **Google Drive** – po kliknięciu „Połącz z Google” (folder `Jarwis`)  
-3. **JSON** – ręczna kopia zapasowa  
-
-Po połączeniu z Google każdy nowy paragon zapisuje się też na Drive.
-""")
     st.stop()
 
-# ──────────────────────────────────────────────
-# DataFrame + filtry + UI wyników
-# ──────────────────────────────────────────────
 rows = []
 for p in st.session_state.paragony_data:
     for item in p["dane"]:
@@ -829,7 +750,6 @@ with tab_overview:
         )
         fig.update_traces(textposition="outside", marker_line_width=0)
         st.plotly_chart(fig, use_container_width=True)
-
         fig2 = px.pie(
             podsumowanie, values="Wartość (PLN)", names="Typ", hole=0.45,
             color_discrete_sequence=px.colors.sequential.Teal,
@@ -837,19 +757,6 @@ with tab_overview:
         fig2.update_traces(textposition="inside", textinfo="percent+label")
         fig2.update_layout(height=340, showlegend=False)
         st.plotly_chart(fig2, use_container_width=True)
-
-        if df_f["Data_dt"].notna().any():
-            monthly = (
-                df_f.dropna(subset=["Data_dt"])
-                .assign(Miesiąc=lambda x: x["Data_dt"].dt.to_period("M").astype(str))
-                .groupby("Miesiąc", as_index=False)["Wartość (PLN)"].sum()
-                .sort_values("Miesiąc")
-            )
-            if len(monthly) > 1:
-                st.plotly_chart(
-                    px.line(monthly, x="Miesiąc", y="Wartość (PLN)", markers=True),
-                    use_container_width=True,
-                )
     with ctb:
         st.dataframe(
             podsumowanie.style.format({"Wartość (PLN)": "{:.2f}"}),
