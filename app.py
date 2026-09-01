@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 st.set_page_config(
-    page_title="Inteligentny Menedżer Paragonów", page_icon="🧾", layout="centered"
+    page_title="Menedżer Wydatków", page_icon="🧾", layout="centered"
 )
 
 st.title("📊 Menedżer Wydatków")
