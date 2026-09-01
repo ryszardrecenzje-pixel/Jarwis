@@ -4,3 +4,4 @@ openpyxl
 Pillow
 google-genai
 plotly
+streamlit-local-storage
