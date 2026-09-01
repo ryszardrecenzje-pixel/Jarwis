@@ -39,6 +39,11 @@ if st.session_state.paragony_data:
     if col_sb2.button("❌", key=f"del_{idx}", help="Usuń ten paragon"):
       st.session_state.paragony_data.pop(idx)
       st.session_state.processed_files = {
+          item["nazwa_plikey"]
+          for item in st.session_state.paragony_data  # bezpieczne odświeżenie
+      }
+      # Przebuduj zestaw przetworzonych plików poprawnie
+      st.session_state.processed_files = {
           item["nazwa_pliku"] for item in st.session_state.paragony_data
       }
       st.rerun()
@@ -84,9 +89,9 @@ if uploaded_files:
                         Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
                         """
 
-            # Użycie uniwersalnego modelu bez przedrostków powodujących błąd
+            # Użycie modelu gemini-2.5-flash zgodnego z nową biblioteką
             response = client.models.generate_content(
-                model="gemini-1.5-flash", contents=[image, prompt]
+                model="gemini-2.5-flash", contents=[image, prompt]
             )
 
             clean_text = (
@@ -143,6 +148,8 @@ if st.session_state.paragony_data:
   st.download_button(
       label="Pobierz plik Excel z podsumowaniem wszystkich zakupów",
       data=excel_data,
-      file_name="jarwis_podsumowanie_paragonow.xlsx",
-      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      file_name="jarwis_podsumowanie_paragon_zbiorcze.xlsx",
+      mime=(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      ),
   )
