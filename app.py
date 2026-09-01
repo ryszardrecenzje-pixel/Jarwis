@@ -6,7 +6,7 @@ st.set_page_config(
     page_title="Inteligentny Menedżer Paragonów", page_icon="🧾", layout="centered"
 )
 
-st.title("📊 Inteligentny Menedżer Paragonów (Jarwis)")
+st.title("📊 Menedżer Wydatków")
 st.write(
     "Wrzuć zdjęcie paragonu, a aplikacja podzieli zakupy na kategorie,"
     " podsumuje wydatki i wygeneruje plik Excel!"
