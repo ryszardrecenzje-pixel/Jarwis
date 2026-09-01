@@ -508,9 +508,7 @@ Tylko pozycje produktów. Brak ilości → 1. Niepewna kategoria → Inne.
 # SIDEBAR
 # ──────────────────────────────────────────────
 with st.sidebar:
-    st.header("🔑 Ustawienia AI")
-    api_key_input = st.text_input("Klucz Google Gemini API", type="password")
-    api_key = api_key_input or st.secrets.get("GEMINI_API_KEY")
+    
 
     st.divider()
     st.subheader("☁️ Google Drive (Faza 3)")
