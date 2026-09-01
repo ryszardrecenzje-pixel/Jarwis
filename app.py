@@ -9,8 +9,17 @@ from PIL import Image
 import streamlit as st
 import plotly.express as px
 
+# localStorage – auto-zapis w przeglądarce telefonu/komputera
+try:
+    from streamlit_local_storage import LocalStorage
+    _local_storage = LocalStorage()
+    HAS_LOCAL_STORAGE = True
+except Exception:
+    _local_storage = None
+    HAS_LOCAL_STORAGE = False
+
 # ──────────────────────────────────────────────
-# Konfiguracja strony
+# Konfiguracja
 # ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Jarwis – Menedżer Paragonów",
@@ -18,6 +27,15 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+LS_KEY = "jarwis_historia_v1"
+MODELS = [
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+]
+HISTORY_VERSION = 1
 
 # ──────────────────────────────────────────────
 # CSS
@@ -32,7 +50,7 @@ st.markdown(
         padding: 1.5rem 2rem; border-radius: 16px; color: white;
         margin-bottom: 1.5rem; box-shadow: 0 8px 24px rgba(15, 118, 110, 0.25);
     }
-    .main-header h1 { margin: 0; font-size: 1.9rem; font-weight: 700; letter-spacing: -0.5px; }
+    .main-header h1 { margin: 0; font-size: 1.9rem; font-weight: 700; }
     .main-header p { margin: 0.4rem 0 0 0; opacity: 0.9; font-size: 1rem; }
     .metric-card {
         background: white; border: 1px solid #e2e8f0; border-radius: 12px;
@@ -48,7 +66,7 @@ st.markdown(
     .stDownloadButton > button {
         background: linear-gradient(135deg, #0f766e, #0d9488) !important;
         color: white !important; border: none !important; border-radius: 10px !important;
-        font-weight: 600 !important; padding: 0.6rem 1.4rem !important;
+        font-weight: 600 !important;
     }
     div[data-testid="stSidebar"] { background: #f8fafc; border-right: 1px solid #e2e8f0; }
     .receipt-badge {
@@ -64,23 +82,11 @@ st.markdown(
     """
     <div class="main-header">
         <h1>🧾 Jarwis – Inteligentny Analizator Paragonów</h1>
-        <p>Analizuj paragony • buduj historię wydatków • podsumowania miesięczne, kwartalne i półroczne</p>
+        <p>Analizuj paragony • historia w pamięci przeglądarki • podsumowania kwartalne i półroczne</p>
     </div>
     """,
     unsafe_allow_html=True,
 )
-
-# ──────────────────────────────────────────────
-# Stałe
-# ──────────────────────────────────────────────
-MODELS = [
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-    "gemini-2.5-flash",
-    "gemini-3.5-flash-lite",
-]
-
-HISTORY_VERSION = 1
 
 # ──────────────────────────────────────────────
 # Session state
@@ -91,21 +97,24 @@ if "processed_files" not in st.session_state:
     st.session_state.processed_files = set()
 if "failed_files" not in st.session_state:
     st.session_state.failed_files = {}
+if "storage_loaded" not in st.session_state:
+    st.session_state.storage_loaded = False
+if "storage_status" not in st.session_state:
+    st.session_state.storage_status = ""
 
 # ──────────────────────────────────────────────
-# Pomocnicze – serializacja historii (bez obiektów PIL)
+# Serializacja historii (bez obrazów PIL)
 # ──────────────────────────────────────────────
 def history_to_serializable(paragony_data):
-    """Konwertuje stan sesji do czystego JSON (bez obrazów)."""
     out = []
     for p in paragony_data:
         out.append({
             "nazwa_pliku": p["nazwa_pliku"],
-            "data_paragonu": p.get("data_paragonu"),  # YYYY-MM-DD lub None
+            "data_paragonu": p.get("data_paragonu"),
             "sklep": p.get("sklep"),
             "dane": p["dane"],
             "model": p.get("model"),
-            "dodano": p.get("dodano"),  # kiedy dodano do Jarwis
+            "dodano": p.get("dodano"),
         })
     return {
         "version": HISTORY_VERSION,
@@ -114,8 +123,7 @@ def history_to_serializable(paragony_data):
     }
 
 
-def load_history_into_session(payload: dict):
-    """Wczytuje historię JSON do session_state (bez obrazów)."""
+def apply_history_payload(payload: dict):
     paragony = payload.get("paragony", [])
     st.session_state.paragony_data = []
     st.session_state.processed_files = set()
@@ -127,82 +135,116 @@ def load_history_into_session(payload: dict):
             "dane": p.get("dane", []),
             "model": p.get("model"),
             "dodano": p.get("dodano"),
-            "obraz": None,  # brak obrazu po imporcie
+            "obraz": None,
         }
         st.session_state.paragony_data.append(entry)
         st.session_state.processed_files.add(entry["nazwa_pliku"])
 
 
-def parse_date_safe(s):
-    """Zwraca date lub None."""
-    if not s:
-        return None
-    if isinstance(s, date) and not isinstance(s, datetime):
-        return s
+def save_to_browser():
+    """Zapisuje historię do localStorage przeglądarki."""
+    if not HAS_LOCAL_STORAGE or _local_storage is None:
+        return False
     try:
-        return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
-    except Exception:
-        return None
+        payload = history_to_serializable(st.session_state.paragony_data)
+        _local_storage.setItem(LS_KEY, json.dumps(payload, ensure_ascii=False))
+        st.session_state.storage_status = (
+            f"Zapisano w przeglądarce · {len(payload['paragony'])} paragonów · "
+            f"{datetime.now().strftime('%H:%M:%S')}"
+        )
+        return True
+    except Exception as e:
+        st.session_state.storage_status = f"Błąd zapisu: {e}"
+        return False
 
+
+def load_from_browser():
+    """Wczytuje historię z localStorage. Zwraca liczbę paragonów lub -1 przy braku."""
+    if not HAS_LOCAL_STORAGE or _local_storage is None:
+        return -1
+    try:
+        raw = _local_storage.getItem(LS_KEY)
+        if not raw:
+            return 0
+        if isinstance(raw, dict):
+            payload = raw
+        else:
+            payload = json.loads(raw)
+        if "paragony" not in payload:
+            return 0
+        apply_history_payload(payload)
+        st.session_state.storage_status = (
+            f"Przywrócono z przeglądarki · {len(payload['paragony'])} paragonów"
+        )
+        return len(payload["paragony"])
+    except Exception as e:
+        st.session_state.storage_status = f"Błąd odczytu: {e}"
+        return -1
+
+
+def clear_browser_storage():
+    if not HAS_LOCAL_STORAGE or _local_storage is None:
+        return
+    try:
+        _local_storage.deleteItem(LS_KEY)
+        st.session_state.storage_status = "Wyczyszczono pamięć przeglądarki"
+    except Exception:
+        try:
+            _local_storage.setItem(LS_KEY, "")
+        except Exception:
+            pass
+
+
+# Auto-wczytanie z localStorage przy pierwszym załadowaniu pustej sesji
+if not st.session_state.storage_loaded:
+    st.session_state.storage_loaded = True
+    if not st.session_state.paragony_data and HAS_LOCAL_STORAGE:
+        n = load_from_browser()
+        if n and n > 0:
+            st.toast(f"Przywrócono {n} paragonów z pamięci tego urządzenia", icon="💾")
 
 # ──────────────────────────────────────────────
 # Analiza AI
 # ──────────────────────────────────────────────
 def analyze_receipt(image, api_key: str):
     client = genai.Client(api_key=api_key)
-
     prompt = """
 Jesteś precyzyjnym systemem OCR i analizy paragonów sklepowych (Polska).
 
-Przeanalizuj zdjęcie paragonu i zwróć WYŁĄCZNIE czysty JSON (jeden obiekt) – bez markdown, bez ```json.
+Zwróć WYŁĄCZNIE czysty JSON (jeden obiekt) – bez markdown, bez ```json.
 
-Struktura odpowiedzi:
 {
   "data_paragonu": "YYYY-MM-DD" lub null,
-  "sklep": "nazwa sklepu/sieci lub null",
+  "sklep": "nazwa sklepu lub null",
   "pozycje": [
     {
-      "Produkt": "nazwa produktu",
-      "Typ": "jedna z: Spożywcze, Napoje, Chemia, Kosmetyki, Narzędzia, Ogród, Materiały budowlane, Elektronika, Odzież, Dom i mieszkanie, Zdrowie, Inne",
+      "Produkt": "nazwa",
+      "Typ": "Spożywcze|Napoje|Chemia|Kosmetyki|Narzędzia|Ogród|Materiały budowlane|Elektronika|Odzież|Dom i mieszkanie|Zdrowie|Inne",
       "Cena": 12.99,
       "Ilość": 1
     }
   ]
 }
 
-Zasady:
-1. data_paragonu – data z nagłówka paragonu w formacie YYYY-MM-DD. Jeśli nieczytelna → null.
-2. sklep – nazwa sieci/sklepu jeśli widoczna.
-3. Tylko pozycje produktów (ignoruj sumy, VAT, NIP, stopki).
-4. Brak ilości → 1. Ceny z kropką. Niepewna kategoria → "Inne".
-5. Zwróć tylko JSON obiektu, nic więcej.
+Zasady: tylko pozycje produktów; brak ilości → 1; niepewna kategoria → Inne; data z nagłówka paragonu.
 """
-
     last_error = None
     for model_name in MODELS:
         for attempt in range(3):
             try:
                 response = client.models.generate_content(
-                    model=model_name,
-                    contents=[image, prompt],
+                    model=model_name, contents=[image, prompt]
                 )
                 raw = response.text.strip()
                 raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                raw = re.sub(r"\s*```$", "", raw)
-                raw = raw.strip()
-
+                raw = re.sub(r"\s*```$", "", raw).strip()
                 data = json.loads(raw)
+                if isinstance(data, list):
+                    data = {"data_paragonu": None, "sklep": None, "pozycje": data}
                 if not isinstance(data, dict):
-                    # fallback: stara lista
-                    if isinstance(data, list):
-                        data = {"data_paragonu": None, "sklep": None, "pozycje": data}
-                    else:
-                        raise ValueError("Oczekiwano obiektu JSON")
+                    raise ValueError("Oczekiwano obiektu JSON")
 
-                pozycje = data.get("pozycje") or data.get("items") or []
-                if not isinstance(pozycje, list):
-                    pozycje = []
-
+                pozycje = data.get("pozycje") or []
                 cleaned = []
                 for it in pozycje:
                     if not isinstance(it, dict):
@@ -229,31 +271,21 @@ Zasady:
                 data_paragonu = data.get("data_paragonu")
                 if data_paragonu:
                     data_paragonu = str(data_paragonu)[:10]
-                    # prosta walidacja
                     try:
                         datetime.strptime(data_paragonu, "%Y-%m-%d")
                     except Exception:
                         data_paragonu = None
-
                 sklep = data.get("sklep")
                 if sklep:
                     sklep = str(sklep).strip()[:80] or None
 
                 return cleaned, model_name, data_paragonu, sklep
-
             except Exception as e:
                 last_error = str(e)
-                is_overload = (
-                    "503" in last_error
-                    or "UNAVAILABLE" in last_error
-                    or "high demand" in last_error.lower()
-                    or "overloaded" in last_error.lower()
-                )
-                if is_overload:
+                if any(x in last_error for x in ("503", "UNAVAILABLE", "high demand", "overloaded")):
                     time.sleep(2 * (attempt + 1))
                     continue
                 break
-
     raise RuntimeError(last_error or "Nie udało się przeanalizować paragonu")
 
 
@@ -262,12 +294,38 @@ Zasady:
 # ──────────────────────────────────────────────
 with st.sidebar:
     st.header("🔑 Ustawienia AI")
-    api_key_input = st.text_input(
-        "Klucz Google Gemini API",
-        type="password",
-        help="Lub Secrets → GEMINI_API_KEY",
-    )
+    api_key_input = st.text_input("Klucz Google Gemini API", type="password")
     api_key = api_key_input or st.secrets.get("GEMINI_API_KEY")
+
+    st.divider()
+    st.subheader("💾 Pamięć tego urządzenia")
+
+    if HAS_LOCAL_STORAGE:
+        st.success("localStorage aktywny – historia zapisuje się automatycznie na tym telefonie/komputerze.")
+        if st.session_state.storage_status:
+            st.caption(st.session_state.storage_status)
+
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("💾 Zapisz teraz", use_container_width=True):
+                if save_to_browser():
+                    st.toast("Zapisano w przeglądarce", icon="💾")
+        with b2:
+            if st.button("📥 Wczytaj", use_container_width=True):
+                n = load_from_browser()
+                if n and n > 0:
+                    st.toast(f"Przywrócono {n} paragonów", icon="📥")
+                    st.rerun()
+                elif n == 0:
+                    st.warning("Brak zapisanej historii w tej przeglądarce.")
+        if st.button("🗑️ Wyczyść pamięć przeglądarki", use_container_width=True):
+            clear_browser_storage()
+            st.toast("Wyczyszczono localStorage", icon="🗑️")
+    else:
+        st.warning(
+            "Pakiet streamlit-local-storage niedostępny. "
+            "Dodaj go do requirements.txt i zrestartuj app."
+        )
 
     st.divider()
     st.subheader("📂 Paragony w sesji")
@@ -283,66 +341,55 @@ with st.sidebar:
                     unsafe_allow_html=True,
                 )
             with col2:
-                if st.button("✕", key=f"del_{idx}", help="Usuń"):
+                if st.button("✕", key=f"del_{idx}"):
                     st.session_state.paragony_data.pop(idx)
                     st.session_state.processed_files = {
                         item["nazwa_pliku"] for item in st.session_state.paragony_data
                     }
+                    save_to_browser()
                     st.rerun()
         if st.button("🧹 Wyczyść sesję", use_container_width=True):
             st.session_state.paragony_data = []
             st.session_state.processed_files = set()
             st.session_state.failed_files = {}
+            save_to_browser()
             st.rerun()
     else:
         st.info("Brak paragonów w sesji.")
 
     st.divider()
-    st.subheader("💾 Historia (telefon / komputer)")
-
-    # EKSPORT JSON
+    st.subheader("📄 Kopia zapasowa (JSON)")
     if st.session_state.paragony_data:
         hist = history_to_serializable(st.session_state.paragony_data)
-        hist_bytes = json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8")
         st.download_button(
-            "⬇️ Eksportuj historię (JSON)",
-            data=hist_bytes,
+            "⬇️ Eksportuj JSON",
+            data=json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8"),
             file_name=f"jarwis_historia_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             mime="application/json",
             use_container_width=True,
-            help="Zapisz ten plik w Google Drive / Plikach na telefonie. Potem możesz go wczytać.",
+            help="Dodatkowa kopia np. na Google Drive (na wypadek czyszczenia przeglądarki).",
         )
 
-    # IMPORT JSON
-    hist_file = st.file_uploader(
-        "Wczytaj historię (JSON)",
-        type=["json"],
-        key="history_uploader",
-        help="Wcześniej wyeksportowany plik jarwis_historia_*.json",
-    )
+    hist_file = st.file_uploader("Wczytaj JSON", type=["json"], key="history_uploader")
     if hist_file is not None:
         try:
             payload = json.load(hist_file)
-            if "paragony" not in payload:
-                st.error("To nie wygląda na plik historii Jarwis.")
-            else:
+            if "paragony" in payload:
                 n = len(payload["paragony"])
                 if st.button(f"📥 Załaduj {n} paragonów z pliku", use_container_width=True):
-                    load_history_into_session(payload)
+                    apply_history_payload(payload)
+                    save_to_browser()
                     st.success(f"Wczytano {n} paragonów.")
                     st.rerun()
+            else:
+                st.error("To nie jest plik historii Jarwis.")
         except Exception as e:
-            st.error(f"Błąd odczytu JSON: {e}")
+            st.error(f"Błąd JSON: {e}")
 
-    st.caption("Faza 3 (Google Drive) – w przygotowaniu. Na razie trzymaj JSON w Drive/Plikach.")
-
-    st.divider()
-    st.caption("Fallback modeli:")
-    for m in MODELS:
-        st.caption(f"• {m}")
+    st.caption("Faza 3 (Google Drive) – później. localStorage = ten telefon/przeglądarka.")
 
 # ──────────────────────────────────────────────
-# Upload nowych paragonów
+# Upload i analiza
 # ──────────────────────────────────────────────
 uploaded_files = st.file_uploader(
     "📷 Wybierz zdjęcie(a) paragonu (JPG / PNG)",
@@ -352,7 +399,7 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
     if not api_key:
-        st.error("⚠️ Brak klucza API. Wpisz go w panelu bocznym lub w Secrets.")
+        st.error("⚠️ Brak klucza API.")
     else:
         for uploaded_file in uploaded_files:
             if uploaded_file.name in st.session_state.processed_files:
@@ -363,7 +410,7 @@ if uploaded_files:
                     if image.mode != "RGB":
                         image = image.convert("RGB")
                 except Exception as e:
-                    status.update(label=f"❌ Błąd otwarcia", state="error")
+                    status.update(label="❌ Błąd otwarcia", state="error")
                     st.error(str(e))
                     continue
                 try:
@@ -379,6 +426,7 @@ if uploaded_files:
                     })
                     st.session_state.processed_files.add(uploaded_file.name)
                     st.session_state.failed_files.pop(uploaded_file.name, None)
+                    save_to_browser()  # auto-zapis po każdym paragonie
                     extra = []
                     if data_paragonu:
                         extra.append(data_paragonu)
@@ -391,11 +439,11 @@ if uploaded_files:
                     )
                 except Exception as e:
                     st.session_state.failed_files[uploaded_file.name] = str(e)
-                    status.update(label=f"❌ Błąd", state="error")
-                    st.error(f"**{uploaded_file.name}**\n\n```\n{e}\n```\n\nKliknij Ponów poniżej.")
+                    status.update(label="❌ Błąd", state="error")
+                    st.error(f"**{uploaded_file.name}**\n\n```\n{e}\n```")
 
 if st.session_state.get("failed_files"):
-    st.warning("Niektóre pliki nie zostały przetworzone:")
+    st.warning("Nieudane pliki – możesz ponowić:")
     for fname in list(st.session_state.failed_files.keys()):
         c1, c2 = st.columns([4, 1])
         c1.caption(f"❌ {fname}")
@@ -404,24 +452,22 @@ if st.session_state.get("failed_files"):
             st.session_state.failed_files.pop(fname, None)
             st.rerun()
 
-# ──────────────────────────────────────────────
-# Brak danych
-# ──────────────────────────────────────────────
 if not st.session_state.paragony_data:
-    st.info("👆 Wrzuć zdjęcia paragonów lub **wczytaj historię JSON** z panelu bocznego.")
+    st.info(
+        "👆 Wrzuć paragony **albo** poczekaj – jeśli wcześniej coś zapisałeś na tym telefonie, "
+        "historia powinna wczytać się sama z pamięci przeglądarki."
+    )
     st.markdown("""
-    **Jak budować historię na telefonie (Faza 1–2):**
-    1. Analizujesz paragony jak zwykle.
-    2. W sidebarze klikasz **Eksportuj historię (JSON)** i zapisujesz plik w Google Drive / Plikach.
-    3. Przy kolejnej wizycie wrzucasz ten plik przez **Wczytaj historię**.
-    4. Możesz dokładać nowe paragony i znowu eksportować (nadpisz stary plik).
-
-    **Faza 3** (automatyczny zapis na Google Drive) – wkrótce.
-    """)
+**Jak działa zapis na telefonie (localStorage):**
+- Po każdym przeanalizowanym paragonie historia zapisuje się **automatycznie** w przeglądarce.
+- Po zamknięciu karty / restarcie aplikacji dane **wracają same** (ta sama przeglądarka, to samo urządzenie).
+- Dodatkowo możesz zrobić kopię JSON na Google Drive (sidebar).
+- Uwaga: wyczyszczenie danych strony w ustawieniach telefonu kasuje localStorage.
+""")
     st.stop()
 
 # ──────────────────────────────────────────────
-# Budowa DataFrame
+# DataFrame
 # ──────────────────────────────────────────────
 rows = []
 for p in st.session_state.paragony_data:
@@ -441,11 +487,10 @@ df["Wartość (PLN)"] = (df["Cena"] * df["Ilość"]).round(2)
 df["Data_dt"] = pd.to_datetime(df["Data"], errors="coerce")
 
 # ──────────────────────────────────────────────
-# FILTRY OKRESU
+# Filtr okresu
 # ──────────────────────────────────────────────
 st.subheader("📅 Zakres podsumowania")
 fc1, fc2, fc3 = st.columns([2, 2, 3])
-
 with fc1:
     period = st.selectbox(
         "Okres",
@@ -460,100 +505,77 @@ with fc1:
             "Bieżący rok",
             "Własny zakres",
         ],
-        index=0,
     )
 
 today = date.today()
 
-def quarter_start(d: date) -> date:
-    q = (d.month - 1) // 3
-    return date(d.year, q * 3 + 1, 1)
+def quarter_start(d):
+    return date(d.year, ((d.month - 1) // 3) * 3 + 1, 1)
 
-def half_start(d: date) -> date:
+def half_start(d):
     return date(d.year, 1 if d.month <= 6 else 7, 1)
 
-start_d, end_d = None, None
+start_d = end_d = None
 if period == "Bieżący miesiąc":
-    start_d = date(today.year, today.month, 1)
-    end_d = today
+    start_d, end_d = date(today.year, today.month, 1), today
 elif period == "Poprzedni miesiąc":
-    first_this = date(today.year, today.month, 1)
-    end_d = first_this - timedelta(days=1)
+    end_d = date(today.year, today.month, 1) - timedelta(days=1)
     start_d = date(end_d.year, end_d.month, 1)
 elif period == "Bieżący kwartał":
-    start_d = quarter_start(today)
-    end_d = today
+    start_d, end_d = quarter_start(today), today
 elif period == "Poprzedni kwartał":
-    qs = quarter_start(today)
-    end_d = qs - timedelta(days=1)
+    end_d = quarter_start(today) - timedelta(days=1)
     start_d = quarter_start(end_d)
 elif period == "Bieżące półrocze":
-    start_d = half_start(today)
-    end_d = today
+    start_d, end_d = half_start(today), today
 elif period == "Ostatnie 6 miesięcy":
-    # przybliżenie
-    m = today.month - 6
-    y = today.year
+    m, y = today.month - 6, today.year
     if m <= 0:
-        m += 12
-        y -= 1
-    start_d = date(y, m, 1)
-    end_d = today
+        m, y = m + 12, y - 1
+    start_d, end_d = date(y, m, 1), today
 elif period == "Bieżący rok":
-    start_d = date(today.year, 1, 1)
-    end_d = today
+    start_d, end_d = date(today.year, 1, 1), today
 elif period == "Własny zakres":
     with fc2:
         start_d = st.date_input("Od", value=today - timedelta(days=90))
     with fc3:
         end_d = st.date_input("Do", value=today)
 
-# Filtrowanie
 df_f = df.copy()
 if start_d and end_d:
     mask = (df_f["Data_dt"].dt.date >= start_d) & (df_f["Data_dt"].dt.date <= end_d)
-    # paragony bez daty – pokazuj tylko przy "Cała historia"
     df_f = df_f[mask]
     st.caption(f"Filtr: **{start_d}** → **{end_d}** · pozycji: {len(df_f)}")
 else:
     st.caption(f"Cała historia · pozycji: {len(df_f)}")
 
 if df_f.empty:
-    st.warning("Brak pozycji w wybranym okresie. Sprawdź daty na paragonach lub wybierz „Cała historia”.")
+    st.warning("Brak pozycji w wybranym okresie.")
     st.stop()
 
-# ──────────────────────────────────────────────
 # Metryki
-# ──────────────────────────────────────────────
 total_spend = df_f["Wartość (PLN)"].sum()
 total_items = len(df_f)
 receipts_in_period = df_f["Paragon"].nunique()
 avg_receipt = total_spend / receipts_in_period if receipts_in_period else 0
 unique_cat = df_f["Typ"].nunique()
 
-c1, c2, c3, c4, c5 = st.columns(5)
-for col, label, value, unit in [
-    (c1, "Suma wydatków", f"{total_spend:,.2f}", "PLN"),
-    (c2, "Pozycje", str(total_items), "produktów"),
-    (c3, "Paragony", str(receipts_in_period), "szt."),
-    (c4, "Średnio / paragon", f"{avg_receipt:,.2f}", "PLN"),
-    (c5, "Kategorie", str(unique_cat), "różnych"),
-]:
+cols = st.columns(5)
+for col, label, value, unit in zip(
+    cols,
+    ["Suma wydatków", "Pozycje", "Paragony", "Średnio / paragon", "Kategorie"],
+    [f"{total_spend:,.2f}", str(total_items), str(receipts_in_period), f"{avg_receipt:,.2f}", str(unique_cat)],
+    ["PLN", "produktów", "szt.", "PLN", "różnych"],
+):
     with col:
         st.markdown(
-            f"""<div class="metric-card">
-            <div class="label">{label}</div>
-            <div class="value">{value}</div>
-            <div class="unit">{unit}</div>
-            </div>""",
+            f'<div class="metric-card"><div class="label">{label}</div>'
+            f'<div class="value">{value}</div><div class="unit">{unit}</div></div>',
             unsafe_allow_html=True,
         )
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ──────────────────────────────────────────────
-# Zakładki
-# ──────────────────────────────────────────────
 tab_overview, tab_details, tab_receipts, tab_export = st.tabs(
     ["📊 Podsumowanie", "🛒 Szczegóły", "🧾 Paragony", "📥 Eksport"]
 )
@@ -573,9 +595,9 @@ with tab_overview:
             text_auto=".2f",
         )
         fig_bar.update_layout(
-            showlegend=False, margin=dict(t=20, b=40, l=40, r=20), height=400,
+            showlegend=False, height=400, coloraxis_showscale=False,
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="", yaxis_title="PLN", coloraxis_showscale=False,
+            xaxis_title="", yaxis_title="PLN", margin=dict(t=20, b=40, l=40, r=20),
         )
         fig_bar.update_traces(textposition="outside", marker_line_width=0)
         st.plotly_chart(fig_bar, use_container_width=True)
@@ -585,12 +607,10 @@ with tab_overview:
             color_discrete_sequence=px.colors.sequential.Teal,
         )
         fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-        fig_pie.update_layout(margin=dict(t=20, b=20, l=20, r=20), height=360, showlegend=False)
+        fig_pie.update_layout(height=360, showlegend=False, margin=dict(t=20, b=20, l=20, r=20))
         st.plotly_chart(fig_pie, use_container_width=True)
 
-        # trend miesięczny jeśli są daty
         if df_f["Data_dt"].notna().any():
-            st.subheader("Trend miesięczny")
             monthly = (
                 df_f.dropna(subset=["Data_dt"])
                 .assign(Miesiąc=lambda x: x["Data_dt"].dt.to_period("M").astype(str))
@@ -598,8 +618,9 @@ with tab_overview:
                 .sort_values("Miesiąc")
             )
             if len(monthly) > 1:
+                st.subheader("Trend miesięczny")
                 fig_m = px.line(monthly, x="Miesiąc", y="Wartość (PLN)", markers=True)
-                fig_m.update_layout(height=320, margin=dict(t=20, b=40, l=40, r=20))
+                fig_m.update_layout(height=300, margin=dict(t=20, b=40, l=40, r=20))
                 st.plotly_chart(fig_m, use_container_width=True)
 
     with col_table:
@@ -617,7 +638,6 @@ with tab_overview:
         )
 
 with tab_details:
-    st.subheader("Pozycje w wybranym okresie")
     f1, f2, f3 = st.columns(3)
     with f1:
         filter_cat = st.multiselect("Kategoria", sorted(df_f["Typ"].dropna().unique()))
@@ -640,12 +660,10 @@ with tab_details:
     else:
         filtered = filtered.sort_values("Produkt")
 
-    show_cols = ["Data", "Sklep", "Produkt", "Typ", "Cena", "Ilość", "Wartość (PLN)", "Paragon"]
-    show_cols = [c for c in show_cols if c in filtered.columns]
+    show_cols = [c for c in ["Data", "Sklep", "Produkt", "Typ", "Cena", "Ilość", "Wartość (PLN)", "Paragon"] if c in filtered.columns]
     st.dataframe(
         filtered[show_cols].style.format(
-            {"Cena": "{:.2f}", "Ilość": "{:g}", "Wartość (PLN)": "{:.2f}"},
-            na_rep="—",
+            {"Cena": "{:.2f}", "Ilość": "{:g}", "Wartość (PLN)": "{:.2f}"}, na_rep="—"
         ),
         use_container_width=True, hide_index=True, height=480,
     )
@@ -658,34 +676,23 @@ with tab_receipts:
         if p.get("sklep"):
             meta.append(p["sklep"])
         meta.append(f"{len(p['dane'])} poz.")
-        if p.get("model"):
-            meta.append(p["model"])
-        title = f"🧾 #{idx+1} {p['nazwa_pliku']}  ·  {' · '.join(meta)}"
-        with st.expander(title, expanded=(idx == 0)):
-            # edycja daty / sklepu
+        with st.expander(f"🧾 #{idx+1} {p['nazwa_pliku']} · {' · '.join(meta)}", expanded=(idx == 0)):
             e1, e2 = st.columns(2)
             with e1:
-                new_date = st.text_input(
-                    "Data (YYYY-MM-DD)",
-                    value=p.get("data_paragonu") or "",
-                    key=f"date_{idx}",
-                )
+                new_date = st.text_input("Data (YYYY-MM-DD)", value=p.get("data_paragonu") or "", key=f"date_{idx}")
             with e2:
-                new_shop = st.text_input(
-                    "Sklep",
-                    value=p.get("sklep") or "",
-                    key=f"shop_{idx}",
-                )
+                new_shop = st.text_input("Sklep", value=p.get("sklep") or "", key=f"shop_{idx}")
             if st.button("💾 Zapisz datę/sklep", key=f"save_meta_{idx}"):
                 nd = new_date.strip() or None
                 if nd:
                     try:
                         datetime.strptime(nd, "%Y-%m-%d")
                     except ValueError:
-                        st.error("Zła data – użyj YYYY-MM-DD")
+                        st.error("Zła data")
                         nd = p.get("data_paragonu")
                 st.session_state.paragony_data[idx]["data_paragonu"] = nd
                 st.session_state.paragony_data[idx]["sklep"] = new_shop.strip() or None
+                save_to_browser()
                 st.rerun()
 
             c1, c2 = st.columns([1, 1.4])
@@ -693,7 +700,7 @@ with tab_receipts:
                 if p.get("obraz") is not None:
                     st.image(p["obraz"], use_container_width=True)
                 else:
-                    st.caption("(brak podglądu – wczytano z historii JSON)")
+                    st.caption("(brak podglądu – dane z pamięci / JSON)")
             with c2:
                 if p["dane"]:
                     local_df = pd.DataFrame(p["dane"])
@@ -705,36 +712,25 @@ with tab_receipts:
                         use_container_width=True, hide_index=True,
                     )
                     st.markdown(f"**Suma:** **{local_df['Wartość (PLN)'].sum():,.2f} PLN**")
-                else:
-                    st.info("Brak pozycji.")
 
 with tab_export:
-    st.subheader("Eksport Excel (przefiltrowany okres)")
+    st.subheader("Excel (bieżący filtr)")
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        export_df = df_f.drop(columns=["Data_dt"], errors="ignore")
-        export_df.to_excel(writer, sheet_name="Zakupy", index=False)
+        df_f.drop(columns=["Data_dt"], errors="ignore").to_excel(writer, sheet_name="Zakupy", index=False)
         podsumowanie.to_excel(writer, sheet_name="Kategorie", index=False)
-        per_r = (
-            df_f.groupby("Paragon", as_index=False)["Wartość (PLN)"]
-            .sum()
-            .sort_values("Wartość (PLN)", ascending=False)
+        df_f.groupby("Paragon", as_index=False)["Wartość (PLN)"].sum().to_excel(
+            writer, sheet_name="Per Paragon", index=False
         )
-        per_r.to_excel(writer, sheet_name="Per Paragon", index=False)
     st.download_button(
-        "⬇️ Pobierz Excel (bieżący filtr)",
+        "⬇️ Pobierz Excel",
         data=output.getvalue(),
-        file_name=f"jarwis_{period.replace(' ', '_').lower()}_{datetime.now().strftime('%Y%m%d')}.xlsx",
+        file_name=f"jarwis_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-
     st.markdown("---")
-    st.subheader("Pełna historia JSON (do telefonu / Drive)")
-    st.markdown(
-        "Zapisz ten plik w **Google Drive** lub **Plikach** na telefonie. "
-        "Przy następnej sesji wczytaj go z sidebara – zachowasz całe podsumowania kwartalne i półroczne."
-    )
+    st.subheader("Kopia zapasowa JSON")
     hist = history_to_serializable(st.session_state.paragony_data)
     st.download_button(
         "⬇️ Eksportuj pełną historię JSON",
@@ -743,9 +739,7 @@ with tab_export:
         mime="application/json",
         use_container_width=True,
     )
-
-    st.markdown("---")
-    st.info(
-        "**Faza 3 (wkrótce):** automatyczne logowanie Google + zapis historii prosto do Twojego folderu na Drive. "
-        "Na razie najwygodniej: eksport JSON → zapisz w Drive → przy kolejnym użyciu wczytaj z sidebara."
+    st.caption(
+        "localStorage trzyma dane na tym urządzeniu. JSON na Drive = zapas na wypadek "
+        "czyszczenia przeglądarki lub zmiany telefonu."
     )
