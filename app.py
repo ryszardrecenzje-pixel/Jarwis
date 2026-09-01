@@ -19,7 +19,7 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────
-# Niestandardowy CSS – nowoczesny wygląd
+# Niestandardowy CSS
 # ──────────────────────────────────────────────
 st.markdown(
     """
@@ -137,7 +137,17 @@ st.markdown(
 )
 
 # ──────────────────────────────────────────────
-# Sidebar – ustawienia i zarządzanie sesją
+# Modele – kolejność fallback (od najnowszego)
+# ──────────────────────────────────────────────
+MODELS = [
+    "gemini-3.7-flash",
+    "gemini-3.6-flash",
+    "gemini-2.5-flash",
+    "gemini-3.5-flash-lite",
+]
+
+# ──────────────────────────────────────────────
+# Sidebar
 # ──────────────────────────────────────────────
 with st.sidebar:
     st.header("🔑 Ustawienia AI")
@@ -155,6 +165,8 @@ with st.sidebar:
         st.session_state.paragony_data = []
     if "processed_files" not in st.session_state:
         st.session_state.processed_files = set()
+    if "failed_files" not in st.session_state:
+        st.session_state.failed_files = {}
 
     if st.session_state.paragony_data:
         for idx, p in enumerate(st.session_state.paragony_data):
@@ -177,16 +189,19 @@ with st.sidebar:
         if st.button("🧹 Wyczyść wszystkie", use_container_width=True):
             st.session_state.paragony_data = []
             st.session_state.processed_files = set()
+            st.session_state.failed_files = {}
             st.rerun()
     else:
         st.info("Brak wgranych paragonów.")
 
     st.divider()
-    st.caption("Model: **gemini-3.7-flash**")
+    st.caption("Modele (kolejność fallback):")
+    for m in MODELS:
+        st.caption(f"• {m}")
     st.caption("Jarwis • Streamlit + Gemini")
 
 # ──────────────────────────────────────────────
-# Upload plików
+# Upload
 # ──────────────────────────────────────────────
 uploaded_files = st.file_uploader(
     "📷 Wybierz zdjęcie(a) paragonu (JPG / PNG)",
@@ -196,35 +211,13 @@ uploaded_files = st.file_uploader(
 )
 
 # ──────────────────────────────────────────────
-# Przetwarzanie nowych plików
+# Funkcja analizy z fallbackiem modeli
 # ──────────────────────────────────────────────
-if uploaded_files:
-    if not api_key:
-        st.error(
-            "⚠️ Brak klucza API. Wpisz go w panelu bocznym lub dodaj do Secrets jako `GEMINI_API_KEY`."
-        )
-    else:
-        for uploaded_file in uploaded_files:
-            if uploaded_file.name in st.session_state.processed_files:
-                continue
+def analyze_receipt(image, api_key: str):
+    """Próbuje kolejno modele z listy MODELS. Zwraca listę pozycji lub rzuca wyjątek."""
+    client = genai.Client(api_key=api_key)
 
-            with st.status(
-                f"🤖 Jarwis analizuje: **{uploaded_file.name}**...", expanded=True
-            ) as status:
-                sukces = False
-                ostatni_blad = ""
-
-                try:
-                    image = Image.open(uploaded_file)
-                    if image.mode != "RGB":
-                        image = image.convert("RGB")
-                except Exception as e:
-                    st.error(f"Nie udało się otworzyć obrazu: {e}")
-                    continue
-
-                client = genai.Client(api_key=api_key)
-
-                prompt = """
+    prompt = """
 Jesteś precyzyjnym systemem OCR i analizy paragonów sklepowych (Polska).
 
 Przeanalizuj zdjęcie paragonu i wypisz WSZYSTKIE zakupione produkty.
@@ -245,74 +238,139 @@ Zasady:
 5. Zwróć tylko listę, nawet jeśli jest pusta: []
 """
 
-                for proba in range(3):
+    last_error = None
+
+    for model_name in MODELS:
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=[image, prompt],
+                )
+
+                raw = response.text.strip()
+                raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                raw = re.sub(r"\s*```$", "", raw)
+                raw = raw.strip()
+
+                items = json.loads(raw)
+                if not isinstance(items, list):
+                    raise ValueError("Odpowiedź nie jest listą JSON")
+
+                cleaned = []
+                for it in items:
+                    if not isinstance(it, dict):
+                        continue
+                    produkt = str(it.get("Produkt", "")).strip()
+                    if not produkt:
+                        continue
+                    typ = str(it.get("Typ", "Inne")).strip() or "Inne"
                     try:
-                        response = client.models.generate_content(
-                            model="gemini-3.7-flash",
-                            contents=[image, prompt],
-                        )
+                        cena = float(it.get("Cena", 0))
+                    except (TypeError, ValueError):
+                        cena = 0.0
+                    try:
+                        ilosc = float(it.get("Ilość", 1))
+                    except (TypeError, ValueError):
+                        ilosc = 1.0
 
-                        raw = response.text.strip()
-                        raw = re.sub(r"^```(?:json)?\s*", "", raw)
-                        raw = re.sub(r"\s*```$", "", raw)
-                        raw = raw.strip()
+                    cleaned.append(
+                        {
+                            "Produkt": produkt,
+                            "Typ": typ,
+                            "Cena": round(cena, 2),
+                            "Ilość": ilosc,
+                        }
+                    )
 
-                        items = json.loads(raw)
+                return cleaned, model_name
 
-                        if not isinstance(items, list):
-                            raise ValueError("Odpowiedź nie jest listą JSON")
+            except Exception as e:
+                last_error = str(e)
+                is_overload = (
+                    "503" in last_error
+                    or "UNAVAILABLE" in last_error
+                    or "high demand" in last_error.lower()
+                    or "overloaded" in last_error.lower()
+                )
+                if is_overload:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                else:
+                    break
 
-                        cleaned = []
-                        for it in items:
-                            if not isinstance(it, dict):
-                                continue
-                            produkt = str(it.get("Produkt", "")).strip()
-                            if not produkt:
-                                continue
-                            typ = str(it.get("Typ", "Inne")).strip() or "Inne"
-                            try:
-                                cena = float(it.get("Cena", 0))
-                            except (TypeError, ValueError):
-                                cena = 0.0
-                            try:
-                                ilosc = float(it.get("Ilość", 1))
-                            except (TypeError, ValueError):
-                                ilosc = 1.0
+    raise RuntimeError(last_error or "Nie udało się przeanalizować paragonu")
 
-                            cleaned.append(
-                                {
-                                    "Produkt": produkt,
-                                    "Typ": typ,
-                                    "Cena": round(cena, 2),
-                                    "Ilość": ilosc,
-                                }
-                            )
 
-                        st.session_state.paragony_data.append(
-                            {
-                                "nazwa_pliku": uploaded_file.name,
-                                "obraz": image,
-                                "dane": cleaned,
-                            }
-                        )
-                        st.session_state.processed_files.add(uploaded_file.name)
-                        sukces = True
-                        status.update(
-                            label=f"✅ Gotowe: {uploaded_file.name} ({len(cleaned)} pozycji)",
-                            state="complete",
-                        )
-                        break
+# ──────────────────────────────────────────────
+# Przetwarzanie nowych plików
+# ──────────────────────────────────────────────
+if uploaded_files:
+    if not api_key:
+        st.error(
+            "⚠️ Brak klucza API. Wpisz go w panelu bocznym lub dodaj do Secrets jako `GEMINI_API_KEY`."
+        )
+    else:
+        for uploaded_file in uploaded_files:
+            if uploaded_file.name in st.session_state.processed_files:
+                continue
 
-                    except Exception as e:
-                        ostatni_blad = str(e)
-                        if "503" in ostatni_blad or "Unavailable" in ostatni_blad:
-                            time.sleep(2.5)
-                        else:
-                            break
+            with st.status(
+                f"🤖 Jarwis analizuje: **{uploaded_file.name}**...", expanded=True
+            ) as status:
+                try:
+                    image = Image.open(uploaded_file)
+                    if image.mode != "RGB":
+                        image = image.convert("RGB")
+                except Exception as e:
+                    status.update(label=f"❌ Błąd otwarcia: {uploaded_file.name}", state="error")
+                    st.error(f"Nie udało się otworzyć obrazu: {e}")
+                    continue
 
-                if not sukces:
+                try:
+                    cleaned, used_model = analyze_receipt(image, api_key)
+
+                    st.session_state.paragony_data.append(
+                        {
+                            "nazwa_pliku": uploaded_file.name,
+                            "obraz": image,
+                            "dane": cleaned,
+                            "model": used_model,
+                        }
+                    )
+                    st.session_state.processed_files.add(uploaded_file.name)
+                    st.session_state.failed_files.pop(uploaded_file.name, None)
+
+                    status.update(
+                        label=f"✅ Gotowe: {uploaded_file.name} ({len(cleaned)} pozycji) • model: {used_model}",
+                        state="complete",
+                    )
+
+                except Exception as e:
+                    err_msg = str(e)
+                    st.session_state.failed_files[uploaded_file.name] = err_msg
                     status.update(label=f"❌ Błąd: {uploaded_file.name}", state="error")
-                    st.error(f"Nie udało się przeanalizować pliku: {ostatni_blad}")
+                    st.error(
+                        f"**Nie udało się przeanalizować pliku** `{uploaded_file.name}`\n\n"
+                        f"```\n{err_msg}\n```\n\n"
+                        "Model był przeciążony (503) lub wystąpił inny błąd. "
+                        "Kliknij **Spróbuj ponownie** poniżej."
+                    )
+
+# ──────────────────────────────────────────────
+# Przyciski ponowienia dla nieudanych plików
+# ──────────────────────────────────────────────
+if st.session_state.get("failed_files"):
+    st.warning("Niektóre pliki nie zostały przetworzone. Możesz spróbować ponownie:")
+    for fname, err in list(st.session_state.failed_files.items()):
+        col_a, col_b = st.columns([4, 1])
+        with col_a:
+            st.caption(f"❌ {fname}")
+        with col_b:
+            if st.button("🔄 Ponów", key=f"retry_{fname}"):
+                st.session_state.processed_files.discard(fname)
+                st.session_state.failed_files.pop(fname, None)
+                st.rerun()
 
 # ──────────────────────────────────────────────
 # Wyniki
@@ -321,7 +379,6 @@ if not st.session_state.paragony_data:
     st.info("👆 Wrzuć pierwsze zdjęcie paragonu, aby rozpocząć analizę.")
     st.stop()
 
-# Zbieranie wszystkich pozycji
 wszystkie_pozycje = []
 for p in st.session_state.paragony_data:
     for item in p["dane"]:
@@ -337,7 +394,6 @@ if df.empty:
 
 df["Wartość (PLN)"] = (df["Cena"] * df["Ilość"]).round(2)
 
-# ── Metryki ───────────────────────────────────
 total_spend = df["Wartość (PLN)"].sum()
 total_items = len(df)
 total_receipts = len(st.session_state.paragony_data)
@@ -403,12 +459,10 @@ with col5:
 
 st.markdown("<br>", unsafe_allow_html=True)
 
-# ── Zakładki ──────────────────────────────────
 tab_overview, tab_details, tab_receipts, tab_export = st.tabs(
     ["📊 Podsumowanie", "🛒 Szczegóły zakupów", "🧾 Poszczególne paragony", "📥 Eksport"]
 )
 
-# ── Tab 1: Podsumowanie ───────────────────────
 with tab_overview:
     podsumowanie = (
         df.groupby("Typ", as_index=False)["Wartość (PLN)"]
@@ -487,7 +541,6 @@ with tab_overview:
             hide_index=True,
         )
 
-# ── Tab 2: Szczegóły ──────────────────────────
 with tab_details:
     st.subheader("Wszystkie pozycje z paragonów")
 
@@ -536,11 +589,11 @@ with tab_details:
         height=480,
     )
 
-# ── Tab 3: Poszczególne paragony ───────────────
 with tab_receipts:
     for idx, p in enumerate(st.session_state.paragony_data):
+        model_info = p.get("model", "?")
         with st.expander(
-            f"🧾 Paragon {idx+1}: {p['nazwa_pliku']}  •  {len(p['dane'])} pozycji",
+            f"🧾 Paragon {idx+1}: {p['nazwa_pliku']}  •  {len(p['dane'])} pozycji  •  {model_info}",
             expanded=(idx == 0),
         ):
             c1, c2 = st.columns([1, 1.4])
@@ -570,7 +623,6 @@ with tab_receipts:
                 else:
                     st.info("Brak rozpoznanych pozycji.")
 
-# ── Tab 4: Eksport ────────────────────────────
 with tab_export:
     st.subheader("Pobierz raport Excel")
 
