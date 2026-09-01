@@ -2,6 +2,7 @@ import io
 import json
 import re
 import time
+import os
 from datetime import datetime, date, timedelta
 from google import genai
 import pandas as pd
@@ -9,7 +10,7 @@ from PIL import Image
 import streamlit as st
 import plotly.express as px
 
-# localStorage – auto-zapis w przeglądarce telefonu/komputera
+# ── localStorage (Faza 2) ─────────────────────
 try:
     from streamlit_local_storage import LocalStorage
     _local_storage = LocalStorage()
@@ -18,8 +19,16 @@ except Exception:
     _local_storage = None
     HAS_LOCAL_STORAGE = False
 
-# ──────────────────────────────────────────────
-# Konfiguracja
+# ── Google Drive (Faza 3) ─────────────────────
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import Flow
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload, MediaIoBaseDownload
+    HAS_GOOGLE = True
+except Exception:
+    HAS_GOOGLE = False
+
 # ──────────────────────────────────────────────
 st.set_page_config(
     page_title="Jarwis – Menedżer Paragonów",
@@ -29,13 +38,22 @@ st.set_page_config(
 )
 
 LS_KEY = "jarwis_historia_v1"
+DRIVE_FILENAME = "jarwis_historia.json"
+DRIVE_FOLDER_NAME = "Jarwis"
+HISTORY_VERSION = 1
 MODELS = [
     "gemini-3.7-flash",
     "gemini-3.6-flash",
     "gemini-2.5-flash",
     "gemini-3.5-flash-lite",
 ]
-HISTORY_VERSION = 1
+# drive.file = tylko pliki utworzone przez tę aplikację
+GOOGLE_SCOPES = [
+    "openid",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/drive.file",
+]
 
 # ──────────────────────────────────────────────
 # CSS
@@ -82,7 +100,7 @@ st.markdown(
     """
     <div class="main-header">
         <h1>🧾 Jarwis – Inteligentny Analizator Paragonów</h1>
-        <p>Analizuj paragony • historia w pamięci przeglądarki • podsumowania kwartalne i półroczne</p>
+        <p>Paragony • localStorage • Google Drive • podsumowania kwartalne i półroczne</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -91,19 +109,23 @@ st.markdown(
 # ──────────────────────────────────────────────
 # Session state
 # ──────────────────────────────────────────────
-if "paragony_data" not in st.session_state:
-    st.session_state.paragony_data = []
-if "processed_files" not in st.session_state:
-    st.session_state.processed_files = set()
-if "failed_files" not in st.session_state:
-    st.session_state.failed_files = {}
-if "storage_loaded" not in st.session_state:
-    st.session_state.storage_loaded = False
-if "storage_status" not in st.session_state:
-    st.session_state.storage_status = ""
+defaults = {
+    "paragony_data": [],
+    "processed_files": set(),
+    "failed_files": {},
+    "storage_loaded": False,
+    "storage_status": "",
+    "google_creds": None,
+    "google_email": None,
+    "drive_file_id": None,
+    "drive_status": "",
+}
+for k, v in defaults.items():
+    if k not in st.session_state:
+        st.session_state[k] = v
 
 # ──────────────────────────────────────────────
-# Serializacja historii (bez obrazów PIL)
+# Historia – serializacja
 # ──────────────────────────────────────────────
 def history_to_serializable(paragony_data):
     out = []
@@ -112,7 +134,7 @@ def history_to_serializable(paragony_data):
             "nazwa_pliku": p["nazwa_pliku"],
             "data_paragonu": p.get("data_paragonu"),
             "sklep": p.get("sklep"),
-            "dane": p["dane"],
+            "dane": p.get("dane", []),
             "model": p.get("model"),
             "dodano": p.get("dodano"),
         })
@@ -123,85 +145,287 @@ def history_to_serializable(paragony_data):
     }
 
 
-def apply_history_payload(payload: dict):
-    paragony = payload.get("paragony", [])
-    st.session_state.paragony_data = []
-    st.session_state.processed_files = set()
-    for p in paragony:
-        entry = {
-            "nazwa_pliku": p.get("nazwa_pliku", "nieznany.jpg"),
+def apply_history_payload(payload: dict, merge: bool = False):
+    """Wczytuje historię. merge=True dokłada brakujące nazwy plików zamiast nadpisywać."""
+    incoming = payload.get("paragony", [])
+    if not merge:
+        st.session_state.paragony_data = []
+        st.session_state.processed_files = set()
+
+    existing = {p["nazwa_pliku"] for p in st.session_state.paragony_data}
+    for p in incoming:
+        name = p.get("nazwa_pliku", "nieznany.jpg")
+        if merge and name in existing:
+            continue
+        st.session_state.paragony_data.append({
+            "nazwa_pliku": name,
             "data_paragonu": p.get("data_paragonu"),
             "sklep": p.get("sklep"),
             "dane": p.get("dane", []),
             "model": p.get("model"),
             "dodano": p.get("dodano"),
             "obraz": None,
-        }
-        st.session_state.paragony_data.append(entry)
-        st.session_state.processed_files.add(entry["nazwa_pliku"])
+        })
+        st.session_state.processed_files.add(name)
 
 
+# ──────────────────────────────────────────────
+# localStorage helpers
+# ──────────────────────────────────────────────
 def save_to_browser():
-    """Zapisuje historię do localStorage przeglądarki."""
     if not HAS_LOCAL_STORAGE or _local_storage is None:
         return False
     try:
         payload = history_to_serializable(st.session_state.paragony_data)
         _local_storage.setItem(LS_KEY, json.dumps(payload, ensure_ascii=False))
         st.session_state.storage_status = (
-            f"Zapisano w przeglądarce · {len(payload['paragony'])} paragonów · "
-            f"{datetime.now().strftime('%H:%M:%S')}"
+            f"localStorage · {len(payload['paragony'])} par. · {datetime.now().strftime('%H:%M:%S')}"
         )
         return True
     except Exception as e:
-        st.session_state.storage_status = f"Błąd zapisu: {e}"
+        st.session_state.storage_status = f"localStorage błąd: {e}"
         return False
 
 
 def load_from_browser():
-    """Wczytuje historię z localStorage. Zwraca liczbę paragonów lub -1 przy braku."""
     if not HAS_LOCAL_STORAGE or _local_storage is None:
         return -1
     try:
         raw = _local_storage.getItem(LS_KEY)
         if not raw:
             return 0
-        if isinstance(raw, dict):
-            payload = raw
-        else:
-            payload = json.loads(raw)
+        payload = raw if isinstance(raw, dict) else json.loads(raw)
         if "paragony" not in payload:
             return 0
         apply_history_payload(payload)
-        st.session_state.storage_status = (
-            f"Przywrócono z przeglądarki · {len(payload['paragony'])} paragonów"
-        )
+        st.session_state.storage_status = f"Przywrócono z localStorage · {len(payload['paragony'])} par."
         return len(payload["paragony"])
     except Exception as e:
-        st.session_state.storage_status = f"Błąd odczytu: {e}"
+        st.session_state.storage_status = f"localStorage błąd: {e}"
         return -1
 
 
-def clear_browser_storage():
-    if not HAS_LOCAL_STORAGE or _local_storage is None:
-        return
+# ──────────────────────────────────────────────
+# Google OAuth + Drive
+# ──────────────────────────────────────────────
+def _google_client_config():
+    """Czyta client_id / secret z secrets."""
     try:
-        _local_storage.deleteItem(LS_KEY)
-        st.session_state.storage_status = "Wyczyszczono pamięć przeglądarki"
+        cid = st.secrets.get("GOOGLE_CLIENT_ID") or st.secrets["google"]["client_id"]
+        csec = st.secrets.get("GOOGLE_CLIENT_SECRET") or st.secrets["google"]["client_secret"]
     except Exception:
-        try:
-            _local_storage.setItem(LS_KEY, "")
-        except Exception:
-            pass
+        return None
+    if not cid or not csec:
+        return None
+    return {
+        "web": {
+            "client_id": cid,
+            "client_secret": csec,
+            "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+            "token_uri": "https://oauth2.googleapis.com/token",
+            "redirect_uris": [_redirect_uri()],
+        }
+    }
 
 
-# Auto-wczytanie z localStorage przy pierwszym załadowaniu pustej sesji
+def _redirect_uri():
+    """URI powrotu – Streamlit Cloud lub lokalnie."""
+    # Można nadpisać w secrets: GOOGLE_REDIRECT_URI
+    try:
+        custom = st.secrets.get("GOOGLE_REDIRECT_URI")
+        if custom:
+            return custom
+    except Exception:
+        pass
+    # Streamlit ustawia czasem te zmienne
+    host = os.environ.get("STREAMLIT_SERVER_URL") or ""
+    if host:
+        return host.rstrip("/") + "/"
+    # Fallback – użytkownik musi ustawić GOOGLE_REDIRECT_URI w secrets
+    return "https://localhost:8501/"
+
+
+def google_configured():
+    return HAS_GOOGLE and _google_client_config() is not None
+
+
+def get_google_auth_url():
+    conf = _google_client_config()
+    if not conf:
+        return None
+    flow = Flow.from_client_config(conf, scopes=GOOGLE_SCOPES, redirect_uri=_redirect_uri())
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
+    st.session_state["oauth_state"] = state
+    return auth_url
+
+
+def complete_google_oauth(code: str):
+    conf = _google_client_config()
+    flow = Flow.from_client_config(conf, scopes=GOOGLE_SCOPES, redirect_uri=_redirect_uri())
+    flow.fetch_token(code=code)
+    creds = flow.credentials
+    st.session_state.google_creds = {
+        "token": creds.token,
+        "refresh_token": creds.refresh_token,
+        "token_uri": creds.token_uri,
+        "client_id": creds.client_id,
+        "client_secret": creds.client_secret,
+        "scopes": list(creds.scopes or GOOGLE_SCOPES),
+    }
+    # email
+    try:
+        service = build("oauth2", "v2", credentials=creds)
+        info = service.userinfo().get().execute()
+        st.session_state.google_email = info.get("email")
+    except Exception:
+        st.session_state.google_email = "połączono"
+
+
+def creds_from_session():
+    data = st.session_state.google_creds
+    if not data:
+        return None
+    return Credentials(
+        token=data.get("token"),
+        refresh_token=data.get("refresh_token"),
+        token_uri=data.get("token_uri"),
+        client_id=data.get("client_id"),
+        client_secret=data.get("client_secret"),
+        scopes=data.get("scopes"),
+    )
+
+
+def drive_service():
+    creds = creds_from_session()
+    if not creds:
+        return None
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def drive_find_or_create_folder(service):
+    q = (
+        f"name='{DRIVE_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' "
+        f"and trashed=false"
+    )
+    res = service.files().list(q=q, spaces="drive", fields="files(id, name)").execute()
+    files = res.get("files", [])
+    if files:
+        return files[0]["id"]
+    meta = {"name": DRIVE_FOLDER_NAME, "mimeType": "application/vnd.google-apps.folder"}
+    folder = service.files().create(body=meta, fields="id").execute()
+    return folder["id"]
+
+
+def drive_find_history_file(service, folder_id):
+    q = (
+        f"name='{DRIVE_FILENAME}' and '{folder_id}' in parents and trashed=false"
+    )
+    res = service.files().list(q=q, spaces="drive", fields="files(id, name, modifiedTime)").execute()
+    files = res.get("files", [])
+    return files[0] if files else None
+
+
+def save_to_drive():
+    """Zapisuje historię JSON na Google Drive użytkownika."""
+    if not st.session_state.google_creds:
+        return False
+    try:
+        service = drive_service()
+        folder_id = drive_find_or_create_folder(service)
+        payload = history_to_serializable(st.session_state.paragony_data)
+        content = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        media = MediaIoBaseUpload(io.BytesIO(content), mimetype="application/json", resumable=False)
+
+        existing = drive_find_history_file(service, folder_id)
+        if existing:
+            service.files().update(
+                fileId=existing["id"], media_body=media
+            ).execute()
+            st.session_state.drive_file_id = existing["id"]
+        else:
+            meta = {"name": DRIVE_FILENAME, "parents": [folder_id]}
+            created = service.files().create(
+                body=meta, media_body=media, fields="id"
+            ).execute()
+            st.session_state.drive_file_id = created["id"]
+
+        st.session_state.drive_status = (
+            f"Drive · zapisano {len(payload['paragony'])} par. · "
+            f"{datetime.now().strftime('%H:%M:%S')}"
+        )
+        return True
+    except Exception as e:
+        st.session_state.drive_status = f"Drive błąd zapisu: {e}"
+        return False
+
+
+def load_from_drive(merge: bool = False):
+    if not st.session_state.google_creds:
+        return -1
+    try:
+        service = drive_service()
+        folder_id = drive_find_or_create_folder(service)
+        existing = drive_find_history_file(service, folder_id)
+        if not existing:
+            st.session_state.drive_status = "Drive · brak pliku historii (jeszcze nic nie zapisano)"
+            return 0
+
+        request = service.files().get_media(fileId=existing["id"])
+        buf = io.BytesIO()
+        downloader = MediaIoBaseDownload(buf, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+        buf.seek(0)
+        payload = json.loads(buf.read().decode("utf-8"))
+        apply_history_payload(payload, merge=merge)
+        st.session_state.drive_file_id = existing["id"]
+        st.session_state.drive_status = (
+            f"Drive · wczytano {len(payload.get('paragony', []))} par. · "
+            f"{existing.get('modifiedTime', '')[:19]}"
+        )
+        return len(payload.get("paragony", []))
+    except Exception as e:
+        st.session_state.drive_status = f"Drive błąd odczytu: {e}"
+        return -1
+
+
+def persist_all():
+    """Zapis lokalny + Drive (jeśli połączono)."""
+    save_to_browser()
+    if st.session_state.google_creds:
+        save_to_drive()
+
+
+# Obsługa powrotu z OAuth (?code=...)
+qp = st.query_params
+if "code" in qp and not st.session_state.google_creds and google_configured():
+    try:
+        complete_google_oauth(qp["code"])
+        # wyczyść parametry z URL
+        st.query_params.clear()
+        # po połączeniu – wczytaj historię z Drive
+        n = load_from_drive(merge=True)
+        save_to_browser()
+        if n and n > 0:
+            st.toast(f"Połączono z Google · przywrócono {n} paragonów z Drive", icon="☁️")
+        else:
+            st.toast("Połączono z Google Drive", icon="☁️")
+        st.rerun()
+    except Exception as e:
+        st.error(f"Błąd logowania Google: {e}")
+
+# Auto-load localStorage przy starcie
 if not st.session_state.storage_loaded:
     st.session_state.storage_loaded = True
     if not st.session_state.paragony_data and HAS_LOCAL_STORAGE:
         n = load_from_browser()
         if n and n > 0:
-            st.toast(f"Przywrócono {n} paragonów z pamięci tego urządzenia", icon="💾")
+            st.toast(f"Przywrócono {n} paragonów z pamięci urządzenia", icon="💾")
 
 # ──────────────────────────────────────────────
 # Analiza AI
@@ -210,23 +434,17 @@ def analyze_receipt(image, api_key: str):
     client = genai.Client(api_key=api_key)
     prompt = """
 Jesteś precyzyjnym systemem OCR i analizy paragonów sklepowych (Polska).
-
-Zwróć WYŁĄCZNIE czysty JSON (jeden obiekt) – bez markdown, bez ```json.
+Zwróć WYŁĄCZNIE czysty JSON (jeden obiekt) – bez markdown.
 
 {
   "data_paragonu": "YYYY-MM-DD" lub null,
   "sklep": "nazwa sklepu lub null",
   "pozycje": [
-    {
-      "Produkt": "nazwa",
-      "Typ": "Spożywcze|Napoje|Chemia|Kosmetyki|Narzędzia|Ogród|Materiały budowlane|Elektronika|Odzież|Dom i mieszkanie|Zdrowie|Inne",
-      "Cena": 12.99,
-      "Ilość": 1
-    }
+    {"Produkt": "nazwa", "Typ": "Spożywcze|Napoje|Chemia|Kosmetyki|Narzędzia|Ogród|Materiały budowlane|Elektronika|Odzież|Dom i mieszkanie|Zdrowie|Inne", "Cena": 12.99, "Ilość": 1}
   ]
 }
 
-Zasady: tylko pozycje produktów; brak ilości → 1; niepewna kategoria → Inne; data z nagłówka paragonu.
+Tylko pozycje produktów. Brak ilości → 1. Niepewna kategoria → Inne.
 """
     last_error = None
     for model_name in MODELS:
@@ -244,15 +462,13 @@ Zasady: tylko pozycje produktów; brak ilości → 1; niepewna kategoria → Inn
                 if not isinstance(data, dict):
                     raise ValueError("Oczekiwano obiektu JSON")
 
-                pozycje = data.get("pozycje") or []
                 cleaned = []
-                for it in pozycje:
+                for it in data.get("pozycje") or []:
                     if not isinstance(it, dict):
                         continue
                     produkt = str(it.get("Produkt", "")).strip()
                     if not produkt:
                         continue
-                    typ = str(it.get("Typ", "Inne")).strip() or "Inne"
                     try:
                         cena = float(it.get("Cena", 0))
                     except (TypeError, ValueError):
@@ -263,7 +479,7 @@ Zasady: tylko pozycje produktów; brak ilości → 1; niepewna kategoria → Inn
                         ilosc = 1.0
                     cleaned.append({
                         "Produkt": produkt,
-                        "Typ": typ,
+                        "Typ": str(it.get("Typ", "Inne")).strip() or "Inne",
                         "Cena": round(cena, 2),
                         "Ilość": ilosc,
                     })
@@ -278,7 +494,6 @@ Zasady: tylko pozycje produktów; brak ilości → 1; niepewna kategoria → Inn
                 sklep = data.get("sklep")
                 if sklep:
                     sklep = str(sklep).strip()[:80] or None
-
                 return cleaned, model_name, data_paragonu, sklep
             except Exception as e:
                 last_error = str(e)
@@ -298,37 +513,82 @@ with st.sidebar:
     api_key = api_key_input or st.secrets.get("GEMINI_API_KEY")
 
     st.divider()
-    st.subheader("💾 Pamięć tego urządzenia")
+    st.subheader("☁️ Google Drive (Faza 3)")
 
-    if HAS_LOCAL_STORAGE:
-        st.success("localStorage aktywny – historia zapisuje się automatycznie na tym telefonie/komputerze.")
-        if st.session_state.storage_status:
-            st.caption(st.session_state.storage_status)
-
-        b1, b2 = st.columns(2)
-        with b1:
-            if st.button("💾 Zapisz teraz", use_container_width=True):
-                if save_to_browser():
-                    st.toast("Zapisano w przeglądarce", icon="💾")
-        with b2:
-            if st.button("📥 Wczytaj", use_container_width=True):
-                n = load_from_browser()
+    if not HAS_GOOGLE:
+        st.error("Brak bibliotek Google – dodaj je do requirements.txt i zrestartuj.")
+    elif not google_configured():
+        st.warning(
+            "Brak konfiguracji OAuth.\n\n"
+            "W Streamlit **Secrets** dodaj:\n\n"
+            "```toml\n"
+            "GOOGLE_CLIENT_ID = \"....apps.googleusercontent.com\"\n"
+            "GOOGLE_CLIENT_SECRET = \"...\"\n"
+            "GOOGLE_REDIRECT_URI = \"https://TWOJA-APP.streamlit.app/\"\n"
+            "```\n\n"
+            "W Google Cloud Console → OAuth Client (Web) "
+            "dodaj ten sam Redirect URI."
+        )
+    elif st.session_state.google_creds:
+        st.success(f"Połączono: **{st.session_state.google_email or 'Google'}**")
+        if st.session_state.drive_status:
+            st.caption(st.session_state.drive_status)
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("☁️ Zapisz na Drive", use_container_width=True):
+                if save_to_drive():
+                    st.toast("Zapisano na Google Drive", icon="☁️")
+        with c2:
+            if st.button("☁️ Wczytaj z Drive", use_container_width=True):
+                n = load_from_drive(merge=False)
+                save_to_browser()
                 if n and n > 0:
-                    st.toast(f"Przywrócono {n} paragonów", icon="📥")
+                    st.toast(f"Wczytano {n} paragonów", icon="☁️")
                     st.rerun()
                 elif n == 0:
-                    st.warning("Brak zapisanej historii w tej przeglądarce.")
-        if st.button("🗑️ Wyczyść pamięć przeglądarki", use_container_width=True):
-            clear_browser_storage()
-            st.toast("Wyczyszczono localStorage", icon="🗑️")
+                    st.info("Na Drive nie ma jeszcze historii.")
+        if st.button("🔌 Rozłącz Google", use_container_width=True):
+            st.session_state.google_creds = None
+            st.session_state.google_email = None
+            st.session_state.drive_file_id = None
+            st.session_state.drive_status = ""
+            st.rerun()
+        st.caption(f"Plik: Drive / {DRIVE_FOLDER_NAME} / {DRIVE_FILENAME}")
     else:
-        st.warning(
-            "Pakiet streamlit-local-storage niedostępny. "
-            "Dodaj go do requirements.txt i zrestartuj app."
-        )
+        auth_url = get_google_auth_url()
+        if auth_url:
+            st.markdown(
+                f'<a href="{auth_url}" target="_self">'
+                f'<button style="width:100%;padding:0.6rem;border:none;border-radius:8px;'
+                f'background:#0f766e;color:white;font-weight:600;cursor:pointer;">'
+                f"🔗 Połącz z Google Drive</button></a>",
+                unsafe_allow_html=True,
+            )
+            st.caption("Zaloguj się kontem Google – historia będzie w folderze „Jarwis” na Twoim Drive.")
+        else:
+            st.error("Nie można utworzyć URL logowania.")
 
     st.divider()
-    st.subheader("📂 Paragony w sesji")
+    st.subheader("💾 Pamięć urządzenia")
+    if HAS_LOCAL_STORAGE:
+        st.caption("localStorage aktywny")
+        if st.session_state.storage_status:
+            st.caption(st.session_state.storage_status)
+        b1, b2 = st.columns(2)
+        with b1:
+            if st.button("💾 Zapisz", use_container_width=True, key="ls_save"):
+                save_to_browser()
+                st.toast("localStorage OK", icon="💾")
+        with b2:
+            if st.button("📥 Wczytaj", use_container_width=True, key="ls_load"):
+                n = load_from_browser()
+                if n and n > 0:
+                    st.rerun()
+    else:
+        st.caption("localStorage niedostępny (brak pakietu)")
+
+    st.divider()
+    st.subheader("📂 Sesja")
     if st.session_state.paragony_data:
         for idx, p in enumerate(st.session_state.paragony_data):
             col1, col2 = st.columns([4, 1])
@@ -344,21 +604,21 @@ with st.sidebar:
                 if st.button("✕", key=f"del_{idx}"):
                     st.session_state.paragony_data.pop(idx)
                     st.session_state.processed_files = {
-                        item["nazwa_pliku"] for item in st.session_state.paragony_data
+                        x["nazwa_pliku"] for x in st.session_state.paragony_data
                     }
-                    save_to_browser()
+                    persist_all()
                     st.rerun()
         if st.button("🧹 Wyczyść sesję", use_container_width=True):
             st.session_state.paragony_data = []
             st.session_state.processed_files = set()
             st.session_state.failed_files = {}
-            save_to_browser()
+            persist_all()
             st.rerun()
     else:
-        st.info("Brak paragonów w sesji.")
+        st.info("Brak paragonów.")
 
     st.divider()
-    st.subheader("📄 Kopia zapasowa (JSON)")
+    st.subheader("📄 Kopia JSON")
     if st.session_state.paragony_data:
         hist = history_to_serializable(st.session_state.paragony_data)
         st.download_button(
@@ -367,44 +627,37 @@ with st.sidebar:
             file_name=f"jarwis_historia_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
             mime="application/json",
             use_container_width=True,
-            help="Dodatkowa kopia np. na Google Drive (na wypadek czyszczenia przeglądarki).",
         )
-
-    hist_file = st.file_uploader("Wczytaj JSON", type=["json"], key="history_uploader")
+    hist_file = st.file_uploader("Wczytaj JSON", type=["json"], key="hist_up")
     if hist_file is not None:
         try:
             payload = json.load(hist_file)
-            if "paragony" in payload:
-                n = len(payload["paragony"])
-                if st.button(f"📥 Załaduj {n} paragonów z pliku", use_container_width=True):
-                    apply_history_payload(payload)
-                    save_to_browser()
-                    st.success(f"Wczytano {n} paragonów.")
-                    st.rerun()
-            else:
-                st.error("To nie jest plik historii Jarwis.")
+            if "paragony" in payload and st.button(
+                f"📥 Załaduj {len(payload['paragony'])} paragonów", use_container_width=True
+            ):
+                apply_history_payload(payload)
+                persist_all()
+                st.rerun()
         except Exception as e:
-            st.error(f"Błąd JSON: {e}")
-
-    st.caption("Faza 3 (Google Drive) – później. localStorage = ten telefon/przeglądarka.")
+            st.error(str(e))
 
 # ──────────────────────────────────────────────
-# Upload i analiza
+# Upload + analiza
 # ──────────────────────────────────────────────
 uploaded_files = st.file_uploader(
-    "📷 Wybierz zdjęcie(a) paragonu (JPG / PNG)",
+    "📷 Zdjęcia paragonów (JPG / PNG)",
     type=["jpg", "jpeg", "png"],
     accept_multiple_files=True,
 )
 
 if uploaded_files:
     if not api_key:
-        st.error("⚠️ Brak klucza API.")
+        st.error("⚠️ Brak klucza Gemini API.")
     else:
         for uploaded_file in uploaded_files:
             if uploaded_file.name in st.session_state.processed_files:
                 continue
-            with st.status(f"🤖 Analizuję: **{uploaded_file.name}**...", expanded=True) as status:
+            with st.status(f"🤖 {uploaded_file.name}...", expanded=True) as status:
                 try:
                     image = Image.open(uploaded_file)
                     if image.mode != "RGB":
@@ -426,24 +679,18 @@ if uploaded_files:
                     })
                     st.session_state.processed_files.add(uploaded_file.name)
                     st.session_state.failed_files.pop(uploaded_file.name, None)
-                    save_to_browser()  # auto-zapis po każdym paragonie
-                    extra = []
-                    if data_paragonu:
-                        extra.append(data_paragonu)
-                    if sklep:
-                        extra.append(sklep)
-                    extra_s = f" · {' · '.join(extra)}" if extra else ""
+                    persist_all()  # localStorage + Drive
+                    extra = " · ".join(filter(None, [data_paragonu, sklep]))
                     status.update(
-                        label=f"✅ {uploaded_file.name} ({len(cleaned)} poz.){extra_s} · {used_model}",
+                        label=f"✅ {uploaded_file.name} ({len(cleaned)}) {extra} · {used_model}",
                         state="complete",
                     )
                 except Exception as e:
                     st.session_state.failed_files[uploaded_file.name] = str(e)
                     status.update(label="❌ Błąd", state="error")
-                    st.error(f"**{uploaded_file.name}**\n\n```\n{e}\n```")
+                    st.error(f"**{uploaded_file.name}**\n```\n{e}\n```")
 
-if st.session_state.get("failed_files"):
-    st.warning("Nieudane pliki – możesz ponowić:")
+if st.session_state.failed_files:
     for fname in list(st.session_state.failed_files.keys()):
         c1, c2 = st.columns([4, 1])
         c1.caption(f"❌ {fname}")
@@ -453,21 +700,19 @@ if st.session_state.get("failed_files"):
             st.rerun()
 
 if not st.session_state.paragony_data:
-    st.info(
-        "👆 Wrzuć paragony **albo** poczekaj – jeśli wcześniej coś zapisałeś na tym telefonie, "
-        "historia powinna wczytać się sama z pamięci przeglądarki."
-    )
+    st.info("Wrzuć paragony albo połącz Google Drive / poczekaj na localStorage.")
     st.markdown("""
-**Jak działa zapis na telefonie (localStorage):**
-- Po każdym przeanalizowanym paragonie historia zapisuje się **automatycznie** w przeglądarce.
-- Po zamknięciu karty / restarcie aplikacji dane **wracają same** (ta sama przeglądarka, to samo urządzenie).
-- Dodatkowo możesz zrobić kopię JSON na Google Drive (sidebar).
-- Uwaga: wyczyszczenie danych strony w ustawieniach telefonu kasuje localStorage.
+**Warstwy zapisu**
+1. **localStorage** – automatycznie na tym telefonie/przeglądarce  
+2. **Google Drive** – po kliknięciu „Połącz z Google” (folder `Jarwis`)  
+3. **JSON** – ręczna kopia zapasowa  
+
+Po połączeniu z Google każdy nowy paragon zapisuje się też na Drive.
 """)
     st.stop()
 
 # ──────────────────────────────────────────────
-# DataFrame
+# DataFrame + filtry + UI wyników
 # ──────────────────────────────────────────────
 rows = []
 for p in st.session_state.paragony_data:
@@ -480,30 +725,21 @@ for p in st.session_state.paragony_data:
 
 df = pd.DataFrame(rows)
 if df.empty:
-    st.warning("Brak pozycji produktowych.")
+    st.warning("Brak pozycji.")
     st.stop()
 
 df["Wartość (PLN)"] = (df["Cena"] * df["Ilość"]).round(2)
 df["Data_dt"] = pd.to_datetime(df["Data"], errors="coerce")
 
-# ──────────────────────────────────────────────
-# Filtr okresu
-# ──────────────────────────────────────────────
 st.subheader("📅 Zakres podsumowania")
 fc1, fc2, fc3 = st.columns([2, 2, 3])
 with fc1:
     period = st.selectbox(
         "Okres",
         [
-            "Cała historia",
-            "Bieżący miesiąc",
-            "Poprzedni miesiąc",
-            "Bieżący kwartał",
-            "Poprzedni kwartał",
-            "Bieżące półrocze",
-            "Ostatnie 6 miesięcy",
-            "Bieżący rok",
-            "Własny zakres",
+            "Cała historia", "Bieżący miesiąc", "Poprzedni miesiąc",
+            "Bieżący kwartał", "Poprzedni kwartał", "Bieżące półrocze",
+            "Ostatnie 6 miesięcy", "Bieżący rok", "Własny zakres",
         ],
     )
 
@@ -543,29 +779,26 @@ elif period == "Własny zakres":
 
 df_f = df.copy()
 if start_d and end_d:
-    mask = (df_f["Data_dt"].dt.date >= start_d) & (df_f["Data_dt"].dt.date <= end_d)
-    df_f = df_f[mask]
-    st.caption(f"Filtr: **{start_d}** → **{end_d}** · pozycji: {len(df_f)}")
+    df_f = df_f[(df_f["Data_dt"].dt.date >= start_d) & (df_f["Data_dt"].dt.date <= end_d)]
+    st.caption(f"Filtr: **{start_d}** → **{end_d}** · {len(df_f)} poz.")
 else:
-    st.caption(f"Cała historia · pozycji: {len(df_f)}")
+    st.caption(f"Cała historia · {len(df_f)} poz.")
 
 if df_f.empty:
-    st.warning("Brak pozycji w wybranym okresie.")
+    st.warning("Brak pozycji w okresie.")
     st.stop()
 
-# Metryki
 total_spend = df_f["Wartość (PLN)"].sum()
 total_items = len(df_f)
-receipts_in_period = df_f["Paragon"].nunique()
-avg_receipt = total_spend / receipts_in_period if receipts_in_period else 0
-unique_cat = df_f["Typ"].nunique()
+n_rec = df_f["Paragon"].nunique()
+avg_r = total_spend / n_rec if n_rec else 0
+n_cat = df_f["Typ"].nunique()
 
-cols = st.columns(5)
 for col, label, value, unit in zip(
-    cols,
-    ["Suma wydatków", "Pozycje", "Paragony", "Średnio / paragon", "Kategorie"],
-    [f"{total_spend:,.2f}", str(total_items), str(receipts_in_period), f"{avg_receipt:,.2f}", str(unique_cat)],
-    ["PLN", "produktów", "szt.", "PLN", "różnych"],
+    st.columns(5),
+    ["Suma", "Pozycje", "Paragony", "Średnio", "Kategorie"],
+    [f"{total_spend:,.2f}", str(total_items), str(n_rec), f"{avg_r:,.2f}", str(n_cat)],
+    ["PLN", "szt.", "szt.", "PLN", ""],
 ):
     with col:
         st.markdown(
@@ -575,7 +808,6 @@ for col, label, value, unit in zip(
         )
 
 st.markdown("<br>", unsafe_allow_html=True)
-
 tab_overview, tab_details, tab_receipts, tab_export = st.tabs(
     ["📊 Podsumowanie", "🛒 Szczegóły", "🧾 Paragony", "📥 Eksport"]
 )
@@ -583,32 +815,30 @@ tab_overview, tab_details, tab_receipts, tab_export = st.tabs(
 with tab_overview:
     podsumowanie = (
         df_f.groupby("Typ", as_index=False)["Wartość (PLN)"]
-        .sum()
-        .sort_values("Wartość (PLN)", ascending=False)
+        .sum().sort_values("Wartość (PLN)", ascending=False)
     )
-    col_chart, col_table = st.columns([1.6, 1])
-    with col_chart:
-        st.subheader("Wydatki według kategorii")
-        fig_bar = px.bar(
+    cch, ctb = st.columns([1.6, 1])
+    with cch:
+        fig = px.bar(
             podsumowanie, x="Typ", y="Wartość (PLN)",
             color="Wartość (PLN)", color_continuous_scale=["#99f6e4", "#0f766e"],
             text_auto=".2f",
         )
-        fig_bar.update_layout(
+        fig.update_layout(
             showlegend=False, height=400, coloraxis_showscale=False,
             plot_bgcolor="rgba(0,0,0,0)", paper_bgcolor="rgba(0,0,0,0)",
-            xaxis_title="", yaxis_title="PLN", margin=dict(t=20, b=40, l=40, r=20),
+            xaxis_title="", yaxis_title="PLN",
         )
-        fig_bar.update_traces(textposition="outside", marker_line_width=0)
-        st.plotly_chart(fig_bar, use_container_width=True)
+        fig.update_traces(textposition="outside", marker_line_width=0)
+        st.plotly_chart(fig, use_container_width=True)
 
-        fig_pie = px.pie(
+        fig2 = px.pie(
             podsumowanie, values="Wartość (PLN)", names="Typ", hole=0.45,
             color_discrete_sequence=px.colors.sequential.Teal,
         )
-        fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-        fig_pie.update_layout(height=360, showlegend=False, margin=dict(t=20, b=20, l=20, r=20))
-        st.plotly_chart(fig_pie, use_container_width=True)
+        fig2.update_traces(textposition="inside", textinfo="percent+label")
+        fig2.update_layout(height=340, showlegend=False)
+        st.plotly_chart(fig2, use_container_width=True)
 
         if df_f["Data_dt"].notna().any():
             monthly = (
@@ -618,22 +848,21 @@ with tab_overview:
                 .sort_values("Miesiąc")
             )
             if len(monthly) > 1:
-                st.subheader("Trend miesięczny")
-                fig_m = px.line(monthly, x="Miesiąc", y="Wartość (PLN)", markers=True)
-                fig_m.update_layout(height=300, margin=dict(t=20, b=40, l=40, r=20))
-                st.plotly_chart(fig_m, use_container_width=True)
-
-    with col_table:
-        st.subheader("Tabela kategorii")
+                st.plotly_chart(
+                    px.line(monthly, x="Miesiąc", y="Wartość (PLN)", markers=True),
+                    use_container_width=True,
+                )
+    with ctb:
         st.dataframe(
             podsumowanie.style.format({"Wartość (PLN)": "{:.2f}"}),
             use_container_width=True, hide_index=True,
         )
         st.markdown("---")
-        st.subheader("Top 5 najdroższych")
-        top5 = df_f.nlargest(5, "Wartość (PLN)")[["Produkt", "Typ", "Wartość (PLN)", "Data", "Paragon"]]
+        st.subheader("Top 5")
         st.dataframe(
-            top5.style.format({"Wartość (PLN)": "{:.2f}"}),
+            df_f.nlargest(5, "Wartość (PLN)")[
+                ["Produkt", "Typ", "Wartość (PLN)", "Data"]
+            ].style.format({"Wartość (PLN)": "{:.2f}"}),
             use_container_width=True, hide_index=True,
         )
 
@@ -645,7 +874,6 @@ with tab_details:
         filter_receipt = st.multiselect("Paragon", sorted(df_f["Paragon"].unique()))
     with f3:
         sort_by = st.selectbox("Sortuj", ["Wartość ↓", "Wartość ↑", "Data ↓", "Produkt A-Z"])
-
     filtered = df_f.copy()
     if filter_cat:
         filtered = filtered[filtered["Typ"].isin(filter_cat)]
@@ -659,10 +887,9 @@ with tab_details:
         filtered = filtered.sort_values("Data_dt", ascending=False, na_position="last")
     else:
         filtered = filtered.sort_values("Produkt")
-
-    show_cols = [c for c in ["Data", "Sklep", "Produkt", "Typ", "Cena", "Ilość", "Wartość (PLN)", "Paragon"] if c in filtered.columns]
+    cols_show = [c for c in ["Data", "Sklep", "Produkt", "Typ", "Cena", "Ilość", "Wartość (PLN)", "Paragon"] if c in filtered.columns]
     st.dataframe(
-        filtered[show_cols].style.format(
+        filtered[cols_show].style.format(
             {"Cena": "{:.2f}", "Ilość": "{:g}", "Wartość (PLN)": "{:.2f}"}, na_rep="—"
         ),
         use_container_width=True, hide_index=True, height=480,
@@ -670,76 +897,60 @@ with tab_details:
 
 with tab_receipts:
     for idx, p in enumerate(st.session_state.paragony_data):
-        meta = []
-        if p.get("data_paragonu"):
-            meta.append(p["data_paragonu"])
-        if p.get("sklep"):
-            meta.append(p["sklep"])
-        meta.append(f"{len(p['dane'])} poz.")
-        with st.expander(f"🧾 #{idx+1} {p['nazwa_pliku']} · {' · '.join(meta)}", expanded=(idx == 0)):
+        meta = " · ".join(filter(None, [
+            p.get("data_paragonu"), p.get("sklep"), f"{len(p['dane'])} poz."
+        ]))
+        with st.expander(f"🧾 #{idx+1} {p['nazwa_pliku']} · {meta}", expanded=(idx == 0)):
             e1, e2 = st.columns(2)
             with e1:
-                new_date = st.text_input("Data (YYYY-MM-DD)", value=p.get("data_paragonu") or "", key=f"date_{idx}")
+                nd = st.text_input("Data YYYY-MM-DD", value=p.get("data_paragonu") or "", key=f"d_{idx}")
             with e2:
-                new_shop = st.text_input("Sklep", value=p.get("sklep") or "", key=f"shop_{idx}")
-            if st.button("💾 Zapisz datę/sklep", key=f"save_meta_{idx}"):
-                nd = new_date.strip() or None
-                if nd:
+                ns = st.text_input("Sklep", value=p.get("sklep") or "", key=f"s_{idx}")
+            if st.button("💾 Zapisz meta", key=f"sm_{idx}"):
+                val = nd.strip() or None
+                if val:
                     try:
-                        datetime.strptime(nd, "%Y-%m-%d")
+                        datetime.strptime(val, "%Y-%m-%d")
                     except ValueError:
                         st.error("Zła data")
-                        nd = p.get("data_paragonu")
-                st.session_state.paragony_data[idx]["data_paragonu"] = nd
-                st.session_state.paragony_data[idx]["sklep"] = new_shop.strip() or None
-                save_to_browser()
+                        val = p.get("data_paragonu")
+                st.session_state.paragony_data[idx]["data_paragonu"] = val
+                st.session_state.paragony_data[idx]["sklep"] = ns.strip() or None
+                persist_all()
                 st.rerun()
-
             c1, c2 = st.columns([1, 1.4])
             with c1:
                 if p.get("obraz") is not None:
                     st.image(p["obraz"], use_container_width=True)
                 else:
-                    st.caption("(brak podglądu – dane z pamięci / JSON)")
+                    st.caption("(brak podglądu obrazu)")
             with c2:
                 if p["dane"]:
-                    local_df = pd.DataFrame(p["dane"])
-                    local_df["Wartość (PLN)"] = (local_df["Cena"] * local_df["Ilość"]).round(2)
+                    ld = pd.DataFrame(p["dane"])
+                    ld["Wartość (PLN)"] = (ld["Cena"] * ld["Ilość"]).round(2)
                     st.dataframe(
-                        local_df.style.format(
-                            {"Cena": "{:.2f}", "Ilość": "{:g}", "Wartość (PLN)": "{:.2f}"}
-                        ),
+                        ld.style.format({"Cena": "{:.2f}", "Ilość": "{:g}", "Wartość (PLN)": "{:.2f}"}),
                         use_container_width=True, hide_index=True,
                     )
-                    st.markdown(f"**Suma:** **{local_df['Wartość (PLN)'].sum():,.2f} PLN**")
+                    st.markdown(f"**Suma: {ld['Wartość (PLN)'].sum():,.2f} PLN**")
 
 with tab_export:
-    st.subheader("Excel (bieżący filtr)")
-    output = io.BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="openpyxl") as writer:
         df_f.drop(columns=["Data_dt"], errors="ignore").to_excel(writer, sheet_name="Zakupy", index=False)
         podsumowanie.to_excel(writer, sheet_name="Kategorie", index=False)
-        df_f.groupby("Paragon", as_index=False)["Wartość (PLN)"].sum().to_excel(
-            writer, sheet_name="Per Paragon", index=False
-        )
     st.download_button(
-        "⬇️ Pobierz Excel",
-        data=output.getvalue(),
+        "⬇️ Excel (filtr)",
+        data=out.getvalue(),
         file_name=f"jarwis_{datetime.now().strftime('%Y%m%d')}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         use_container_width=True,
     )
-    st.markdown("---")
-    st.subheader("Kopia zapasowa JSON")
     hist = history_to_serializable(st.session_state.paragony_data)
     st.download_button(
-        "⬇️ Eksportuj pełną historię JSON",
+        "⬇️ Pełna historia JSON",
         data=json.dumps(hist, ensure_ascii=False, indent=2).encode("utf-8"),
         file_name=f"jarwis_historia_{datetime.now().strftime('%Y%m%d_%H%M')}.json",
         mime="application/json",
         use_container_width=True,
-    )
-    st.caption(
-        "localStorage trzyma dane na tym urządzeniu. JSON na Drive = zapas na wypadek "
-        "czyszczenia przeglądarki lub zmiany telefonu."
     )
