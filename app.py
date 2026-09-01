@@ -15,14 +15,11 @@ st.write(
     " pozycje, dopasuje kategorie i przygotuje Excela!"
 )
 
-# Konfiguracja klucza API (można wpisać klucz w Secrets w Streamlit lub podać w panelu bocznym)
+# Konfiguracja klucza API (ze Secrets lub panelu bocznego)
 st.sidebar.header("🔑 Ustawienia AI")
 api_key_input = st.sidebar.text_input(
     "Podaj klucz Google Gemini API", type="password"
 )
-
-
-# Sprawdzenie klucza (ze Streamlit Secrets lub z panelu bocznego)
 api_key = api_key_input or st.secrets.get("GEMINI_API_KEY")
 
 uploaded_file = st.file_uploader(
@@ -36,8 +33,8 @@ if uploaded_file is not None:
   if st.button("🚀 Przetwórz paragon przez Jarwisa"):
     if not api_key:
       st.error(
-          "⚠️ Musisz podać klucz Google Gemini API w panelu bocznym po lewej"
-          " stronie!"
+          "⚠️ Brak klucza API! Wpisz go w sekcji Secrets w Streamlit Cloud lub w"
+          " panelu bocznym."
       )
     else:
       with st.spinner("🤖 Jarwis analizuje Twój paragon... Proszę czekać."):
@@ -47,22 +44,22 @@ if uploaded_file is not None:
 
           # Prompt wymuszający strukturę danych z paragonu
           prompt = """
-                    Przeanalizuj to zdjęcie paragonu. Wypisz wszystkie zakupione produkty w formacie JSON (jako lista obiektów).
+                    Przeanalizuj to zdjęcie paragonu z Castoramy. Wypisz wszystkie zakupione produkty w formacie JSON (jako lista obiektów).
                     Każdy obiekt musi mieć dokładnie te klucze:
                     - "Produkt": nazwa produktu z paragonu
                     - "Typ": kategoria produktu (np. Narzędzia, Ogród, Chemia, Materiały budowlane, Inne)
                     - "Cena": cena jednostkowa brutto jako liczba (float)
-                    - "Ilość": ilość jako liczba całkowita lub zmiennoprzecیینa (float)
+                    - "Ilość": ilość jako liczba całkowita lub zmiennoprzecinkowa (float)
 
                     Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
                     """
 
-          # Wywołanie modelu multimodalnego (Gemini 2.5 Flash / 1.5 Flash)
+          # ZAKTUALIZOWANA NAZWA MODELU NA gemini-2.6-flash
           response = client.models.generate_content(
-              model="gemini-2.5-flash", contents=[image, prompt]
+              model="gemini-2.6-flash", contents=[image, prompt]
           )
 
-          # Oczyszczenie odpowiedzi z ewentualnych znaczników markdown
+          # Oczyszczenie odpowiedzi
           clean_text = (
               response.text.strip()
               .replace("```json", "")
