@@ -37,9 +37,7 @@ if st.session_state.paragony_data:
     col_sb1, col_sb2 = st.sidebar.columns([3, 1])
     col_sb1.text(f"Paragon {idx+1}: {p['nazwa_pliku']}")
     if col_sb2.button("❌", key=f"del_{idx}", help="Usuń ten paragon"):
-      # Usunięcie paragonu z listy
       st.session_state.paragony_data.pop(idx)
-      # Usuwamy też z zestawu przetworzonych, aby w razie potrzeby można było wrzucić ponownie
       st.session_state.processed_files = {
           item["nazwa_pliku"] for item in st.session_state.paragony_data
       }
@@ -66,7 +64,6 @@ if uploaded_files:
         " panelu bocznym."
     )
   else:
-    # Sprawdzamy, czy pojawiły się nowe pliki, których jeszcze nie analizowaliśmy
     for uploaded_file in uploaded_files:
       if uploaded_file.name not in st.session_state.processed_files:
         with st.spinner(
@@ -87,7 +84,7 @@ if uploaded_files:
                         Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
                         """
 
-            # Użycie stabilnego i szybkiego modelu gemini-1.5-flash
+            # Użycie uniwersalnego modelu bez przedrostków powodujących błąd
             response = client.models.generate_content(
                 model="gemini-1.5-flash", contents=[image, prompt]
             )
@@ -101,7 +98,6 @@ if uploaded_files:
 
             items = json.loads(clean_text)
 
-            # Zapisujemy do pamięci sesji
             st.session_state.paragony_data.append({
                 "nazwa_pliku": uploaded_file.name,
                 "obraz": image,
@@ -114,11 +110,10 @@ if uploaded_files:
                 f"Wystąpił błąd podczas analizy pliku {uploaded_file.name}: {e}"
             )
 
-# Jeśli mamy jakiekolwiek przetworzone dane, wyświetlamy podsumowanie
+# Wyświetlanie wyników, tabel i wykresów
 if st.session_state.paragony_data:
   st.success("✅ Wszystkie paragony zostały pomyślnie przetworzone!")
 
-  # Łączymy wszystkie pozycje ze wszystkich paragonów w jedną wielką tabelę
   wszystkie_pozycje = []
   for p in st.session_state.paragony_data:
     for item in p["dane"]:
