@@ -1,4 +1,5 @@
 import io
+import json
 import os
 from google import genai
 import pandas as pd
@@ -11,8 +12,8 @@ st.set_page_config(
 
 st.title("📊 Jarwis - Inteligentny Analizator Paragonów")
 st.write(
-    "Wrzuć zdjęcie paragonu z Castoramy lub innego sklepu, a Jarwis odczyta"
-    " pozycje, dopasuje kategorie i przygotuje Excela!"
+    "Wrzuć jedno lub wiele zdjęć paragonów. Jarwis automatycznie odczyta"
+    " pozycje, zsumuje wydatki i przygotuje dla Ciebie plik Excel!"
 )
 
 # Konfiguracja klucza API (ze Secrets lub panelu bocznego)
@@ -22,86 +23,131 @@ api_key_input = st.sidebar.text_input(
 )
 api_key = api_key_input or st.secrets.get("GEMINI_API_KEY")
 
-uploaded_file = st.file_uploader(
-    "Wybierz zdjęcie paragonu...", type=["jpg", "jpeg", "png"]
+# Inicjalizacja stanu sesji do przechowywania historii przetworzonych paragonów
+if "paragony_data" not in st.session_state:
+  st.session_state.paragony_data = []
+
+if "processed_files" not in st.session_state:
+  st.session_state.processed_files = set()
+
+# Panel boczny z zarządzaniem wgranymi paragonami
+st.sidebar.subheader("📂 Twoje paragony w sesji")
+if st.session_state.paragony_data:
+  for idx, p in enumerate(st.session_state.paragony_data):
+    col_sb1, col_sb2 = st.sidebar.columns([3, 1])
+    col_sb1.text(f"Paragon {idx+1}: {p['nazwa_pliku']}")
+    if col_sb2.button("❌", key=f"del_{idx}", help="Usuń ten paragon"):
+      # Usunięcie paragonu z listy
+      st.session_state.paragony_data.pop(idx)
+      # Usuwamy też z zestawu przetworzonych, aby w razie potrzeby można było wrzucić ponownie
+      st.session_state.processed_files = {
+          item["nazwa_pliku"] for item in st.session_state.paragony_data
+      }
+      st.rerun()
+
+  if st.sidebar.button("🧹 Wyczyść wszystkie paragony"):
+    st.session_state.paragony_data = []
+    st.session_state.processed_files = set()
+    st.rerun()
+else:
+  st.sidebar.info("Brak wgranych paragonów.")
+
+# 1. Wgrywanie wielu plików naraz
+uploaded_files = st.file_uploader(
+    "Wybierz zdjęcie(a) paragonu...",
+    type=["jpg", "jpeg", "png"],
+    accept_multiple_files=True,
 )
 
-if uploaded_file is not None:
-  image = Image.open(uploaded_file)
-  st.image(image, caption="Wgrany paragon", use_container_width=True)
+if uploaded_files:
+  if not api_key:
+    st.error(
+        "⚠️ Brak klucza API! Wpisz go w sekcji Secrets w Streamlit Cloud lub w"
+        " panelu bocznym."
+    )
+  else:
+    # Sprawdzamy, czy pojawiły się nowe pliki, których jeszcze nie analizowaliśmy
+    for uploaded_file in uploaded_files:
+      if uploaded_file.name not in st.session_state.processed_files:
+        with st.spinner(
+            f"🤖 Jarwis automatycznie analizuje plik: {uploaded_file.name}..."
+        ):
+          try:
+            image = Image.open(uploaded_file)
+            client = genai.Client(api_key=api_key)
 
-  if st.button("🚀 Przetwórz paragon przez Jarwisa"):
-    if not api_key:
-      st.error(
-          "⚠️ Brak klucza API! Wpisz go w sekcji Secrets w Streamlit Cloud lub w"
-          " panelu bocznym."
-      )
-    else:
-      with st.spinner("🤖 Jarwis analizuje Twój paragon... Proszę czekać."):
-        try:
-          # Inicjalizacja klienta Google GenAI
-          client = genai.Client(api_key=api_key)
+            prompt = """
+                        Przeanalizuj to zdjęcie paragonu. Wypisz wszystkie zakupione produkty w formacie JSON (jako lista obiektów).
+                        Każdy obiekt musi mieć dokładnie te klucze:
+                        - "Produkt": nazwa produktu z paragonu
+                        - "Typ": kategoria produktu (np. Narzędzia, Ogród, Chemia, Materiały budowlane, Spożywcze, Inne)
+                        - "Cena": cena jednostkowa brutto jako liczba (float)
+                        - "Ilość": ilość jako liczba całkowita lub zmiennoprzecinkowa (float)
 
-          # Prompt wymuszający strukturę danych z paragonu
-          prompt = """
-                    Przeanalizuj to zdjęcie paragonu z Castoramy. Wypisz wszystkie zakupione produkty w formacie JSON (jako lista obiektów).
-                    Każdy obiekt musi mieć dokładnie te klucze:
-                    - "Produkt": nazwa produktu z paragonu
-                    - "Typ": kategoria produktu (np. Narzędzia, Ogród, Chemia, Materiały budowlane, Inne)
-                    - "Cena": cena jednostkowa brutto jako liczba (float)
-                    - "Ilość": ilość jako liczba całkowita lub zmiennoprzecinkowa (float)
+                        Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
+                        """
 
-                    Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
-                    """
+            # Użycie stabilnego i szybkiego modelu gemini-1.5-flash
+            response = client.models.generate_content(
+                model="gemini-1.5-flash", contents=[image, prompt]
+            )
 
-          # Użycie stabilnego i globalnie wspieranego identyfikatora modelu
-          response = client.models.generate_content(
-              model="gemini-3.7-flash", contents=[image, prompt]
-          )
+            clean_text = (
+                response.text.strip()
+                .replace("```json", "")
+                .replace("```", "")
+                .strip()
+            )
 
-          # Oczyszczenie odpowiedzi
-          clean_text = (
-              response.text.strip()
-              .replace("```json", "")
-              .replace("```", "")
-              .strip()
-          )
+            items = json.loads(clean_text)
 
-          import json
+            # Zapisujemy do pamięci sesji
+            st.session_state.paragony_data.append({
+                "nazwa_pliku": uploaded_file.name,
+                "obraz": image,
+                "dane": items,
+            })
+            st.session_state.processed_files.add(uploaded_file.name)
 
-          dane_paragonu = json.loads(clean_text)
+          except Exception as e:
+            st.error(
+                f"Wystąpił błąd podczas analizy pliku {uploaded_file.name}: {e}"
+            )
 
-          df = pd.DataFrame(dane_paragonu)
-          df["Wartość (PLN)"] = df["Cena"] * df["Ilość"]
+# Jeśli mamy jakiekolwiek przetworzone dane, wyświetlamy podsumowanie
+if st.session_state.paragony_data:
+  st.success("✅ Wszystkie paragony zostały pomyślnie przetworzone!")
 
-          st.success("✅ Paragon został pomyślnie zanalizowany przez Jarwisa!")
+  # Łączymy wszystkie pozycje ze wszystkich paragonów w jedną wielką tabelę
+  wszystkie_pozycje = []
+  for p in st.session_state.paragony_data:
+    for item in p["dane"]:
+      item_copy = item.copy()
+      item_copy["Paragon Źródłowy"] = p["nazwa_pliku"]
+      wszystkie_pozycje.append(item_copy)
 
-          # Tabela wyników
-          st.subheader("🛒 Szczegółowa rozpiska zakupów:")
-          st.dataframe(df, use_container_width=True)
+  df = pd.DataFrame(wszystkie_pozycje)
+  df["Wartość (PLN)"] = df["Cena"] * df["Ilość"]
 
-          # Podsumowanie
-          st.subheader("📈 Podsumowanie wydatków według kategorii:")
-          podsumowanie = df.groupby("Typ")["Wartość (PLN)"].sum().reset_index()
-          st.bar_chart(podsumowanie.set_index("Typ"))
-          st.dataframe(podsumowanie, use_container_width=True)
+  st.subheader("🛒 Łączna szczegółowa rozpiska zakupów:")
+  st.dataframe(df, use_container_width=True)
 
-          # Generowanie pliku Excel
-          output = io.BytesIO()
-          with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            df.to_excel(writer, sheet_name="Zakupy", index=False)
-            podsumowanie.to_excel(writer, sheet_name="Podsumowanie", index=False)
-          excel_data = output.getvalue()
+  st.subheader("📈 Podsumowanie wydatków według kategorii:")
+  podsumowanie = df.groupby("Typ")["Wartość (PLN)"].sum().reset_index()
+  st.bar_chart(podsumowanie.set_index("Typ"))
+  st.dataframe(podsumowanie, use_container_width=True)
 
-          st.subheader("📥 Pobierz raport")
-          st.download_button(
-              label="Pobierz plik Excel z podsumowaniem",
-              data=excel_data,
-              file_name="analiza_paragonu_jarwis.xlsx",
-              mime=(
-                  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-              ),
-          )
+  # Generowanie pliku Excel
+  output = io.BytesIO()
+  with pd.ExcelWriter(output, engine="openpyxl") as writer:
+    df.to_excel(writer, sheet_name="Wszystkie Zakupy", index=False)
+    podsumowanie.to_excel(writer, sheet_name="Podsumowanie Kategorii", index=False)
+  excel_data = output.getvalue()
 
-        except Exception as e:
-          st.error(f"Wystąpił błąd podczas analizy obrazu przez AI: {e}")
+  st.subheader("📥 Pobierz raport zbiorczy")
+  st.download_button(
+      label="Pobierz plik Excel z podsumowaniem wszystkich zakupów",
+      data=excel_data,
+      file_name="jarwis_podsumowanie_paragonow.xlsx",
+      mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  )
