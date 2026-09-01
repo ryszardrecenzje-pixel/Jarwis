@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import time
 from google import genai
 import pandas as pd
 from PIL import Image
@@ -69,11 +70,14 @@ if uploaded_files:
         with st.spinner(
             f"🤖 Jarwis automatycznie analizuje plik: {uploaded_file.name}..."
         ):
-          try:
-            image = Image.open(uploaded_file)
-            client = genai.Client(api_key=api_key)
+          sukces_analizy = False
+          ostatni_blad = ""
 
-            prompt = """
+          # Pętle powtórzeń (obsługa chwilowego przeciążenia serwerów 503)
+          image = Image.open(uploaded_file)
+          client = genai.Client(api_key=api_key)
+
+          prompt = """
                         Przeanalizuj to zdjęcie paragonu. Wypisz wszystkie zakupione produkty w formacie JSON (jako lista obiektów).
                         Każdy obiekt musi mieć dokładnie te klucze:
                         - "Produkt": nazwa produktu z paragonu
@@ -84,31 +88,46 @@ if uploaded_files:
                         Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
                         """
 
-            # Użycie wskazanego w komunikacie błędu aktualnego modelu gemini-3.6-flash
-            response = client.models.generate_content(
-                model="gemini-3.6-flash", contents=[image, prompt]
-            )
+          for proba in range(3):  # 3 próby połączenia
+            try:
+              response = client.models.generate_content(
+                  model="gemini-3.6-flash", contents=[image, prompt]
+              )
 
-            clean_text = (
-                response.text.strip()
-                .replace("```json", "")
-                .replace("```", "")
-                .strip()
-            )
+              clean_text = (
+                  response.text.strip()
+                  .replace("```json", "")
+                  .replace("```", "")
+                  .strip()
+              )
+              items = json.loads(clean_text)
 
-            items = json.loads(clean_text)
+              st.session_state.paragony_data.append({
+                  "nazwa_pliku": uploaded_file.name,
+                  "obraz": image,
+                  "dane": items,
+              })
+              st.session_state.processed_files.add(uploaded_file.name)
+              sukces_analizy = True
+              break
+            except Exception as e:
+              ostatni_blad = str(e)
+              if "503" in str(e) or "Unavailable" in str(e):
+                time.sleep(2)  # odczekaj 2 sekundy przed ponowną próbą
+              else:
+                break  # inny błąd, przerwij próby
 
-            st.session_state.paragony_data.append({
-                "nazwa_pliku": uploaded_file.name,
-                "obraz": image,
-                "dane": items,
-            })
-            st.session_state.processed_files.add(uploaded_file.name)
-
-          except Exception as e:
+          if not sukces_analizy:
             st.error(
-                f"Wystąpił błąd podczas analizy pliku {uploaded_file.name}: {e}"
+                f"Wystąpił błąd podczas analizy pliku {uploaded_file.name}:"
+                f" {ostatni_blad}"
             )
+            if st.button(
+                f"🔄 Spróbuj ponownie przetworzyć {uploaded_file.name}",
+                key=f"retry_{uploaded_file.name}",
+            ):
+              # Usunięciem z zablokowanych, aby spróbował ponownie
+              st.rerun()
 
 # Wyświetlanie wyników, tabel i wykresów
 if st.session_state.paragony_data:
