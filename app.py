@@ -54,9 +54,9 @@ if uploaded_file is not None:
                     Zwróć TYLKO czysty ciąg JSON, bez dodatkowego formatowania markdown (bez ```json ... ```), sam JSON.
                     """
 
-          # ZAKTUALIZOWANA NAZWA MODELU NA gemini-2.6-flash
+          # Użycie stabilnego i wspieranego modelu gemini-2.5-flash
           response = client.models.generate_content(
-              model="gemini-2.6-flash", contents=[image, prompt]
+              model="gemini-2.5-flash", contents=[image, prompt]
           )
 
           # Oczyszczenie odpowiedzi
